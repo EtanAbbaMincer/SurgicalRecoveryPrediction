@@ -49,6 +49,15 @@ discovery, and the Parquet-cached BigQuery reader -- imported by each notebook r
 copy-pasted. Notebooks find it by walking up from `cwd`, so they run from either the task
 directory or the root:
 
+If the CDR cannot be resolved from the environment, `init` raises and prints every
+environment variable that might carry it. Pass it explicitly to get moving, and add the real
+variable name to `CDR_ENV_CANDIDATES` in `srp_common.py` once known:
+
+```python
+cfg = srp_common.init("<stem>", cdr="<project>.<dataset>")        # CDR override
+cfg = srp_common.init("<stem>", cdr_index="<project>.<dataset>")  # skip index discovery
+```
+
 ```python
 cfg = srp_common.init("<notebook stem>")
 CDR, CDR_INDEX = cfg.CDR, cfg.CDR_INDEX

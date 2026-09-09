@@ -37,31 +37,100 @@ from typing import Callable
 
 __all__ = [
     "CDR_ENV_CANDIDATES",
+    "resolve_cdr",
     "Session",
     "discover_cohort_index",
     "init",
     "resolve_cdr",
 ]
 
-CDR_ENV_CANDIDATES = ("WORKSPACE_CDR", "CDR_DATASET", "WORKSPACE_CDR_DATASET")
+CDR_ENV_CANDIDATES = (
+    # All of Us Researcher Workbench
+    "WORKSPACE_CDR",
+    "CDR_DATASET",
+    "WORKSPACE_CDR_DATASET",
+    # Verily Workbench / generic
+    "WORKBENCH_CDR",
+    "SRP_CDR",
+)
+
+# Any env key matching this, whose value looks like "project.dataset", is treated as
+# a candidate CDR. Cheaper than maintaining a list of every platform's variable name.
+_CDR_KEY_HINT = ("CDR", "CURATED", "DATASET")
 
 
-def resolve_cdr() -> tuple[str, str]:
-    """Return (env var name, CDR dataset) from the workspace environment.
+def _looks_like_dataset(value: str) -> bool:
+    """True for a 'project.dataset' reference: one dot, no whitespace, no slashes."""
+    value = (value or "").strip()
+    return (
+        value.count(".") == 1
+        and not any(c.isspace() for c in value)
+        and "/" not in value
+        and all(part for part in value.split("."))
+    )
 
-    Never falls back to a literal project ID: a wrong-but-plausible dataset would
-    fail silently, so this raises with instructions instead.
+
+def _env_candidates() -> dict[str, str]:
+    """Env keys that hint at a CDR and hold something shaped like a dataset ref."""
+    return {
+        k: v for k, v in os.environ.items()
+        if any(h in k.upper() for h in _CDR_KEY_HINT) and _looks_like_dataset(v)
+    }
+
+
+def resolve_cdr(cdr: str | None = None) -> tuple[str, str]:
+    """Return (source, CDR dataset).
+
+    Resolution order: an explicit `cdr` argument, then the known variable names,
+    then any environment key that hints at a CDR and holds a 'project.dataset'
+    value. Never falls back to a literal project ID -- a wrong-but-plausible
+    dataset fails silently, so this raises with diagnostics instead.
     """
+    if cdr:
+        if not _looks_like_dataset(cdr):
+            raise ValueError(
+                f"cdr={cdr!r} does not look like 'project.dataset'."
+            )
+        return "explicit argument", cdr
+
     for var in CDR_ENV_CANDIDATES:
         value = os.environ.get(var)
         if value:
-            return var, value
+            return f"${var}", value
+
+    discovered = _env_candidates()
+    if len(discovered) == 1:
+        var, value = next(iter(discovered.items()))
+        print(f"Note: resolved the CDR from ${var} by pattern match, not a known name.")
+        return f"${var} (discovered)", value
+    if len(discovered) > 1:
+        raise RuntimeError(
+            "Several environment variables look like a CDR dataset; pass the right "
+            "one explicitly as srp_common.init(..., cdr=...):\n"
+            + "\n".join(f"    {k} = {v}" for k, v in sorted(discovered.items()))
+        )
+
+    # Nothing found. Report what IS in the environment so the next run resolves it.
+    nearby = {
+        k: v for k, v in sorted(os.environ.items())
+        if any(h in k.upper() for h in
+               ("CDR", "DATASET", "WORKSPACE", "WORKBENCH", "PROJECT", "BIGQUERY", "BQ", "GOOGLE"))
+    }
+    listing = ("\n".join(f"    {k} = {v}" for k, v in nearby.items())
+               if nearby else "    (no plausibly related variables found)")
     raise RuntimeError(
-        "Could not resolve the CDR dataset from the environment. Tried: "
+        "Could not resolve the CDR dataset. Tried the known names ("
         + ", ".join(CDR_ENV_CANDIDATES)
-        + ". Set the variable this workspace uses (check os.environ for a key "
-          "containing 'CDR'), or export it before starting the kernel. "
-          "Do not hard-code the project ID."
+        + ") and pattern-matched every environment key.\n\n"
+        "Environment variables that might carry it:\n" + listing + "\n\n"
+        "Fix one of two ways:\n"
+        "  1. If one of the above is the CDR, pass it for now:\n"
+        "         cfg = srp_common.init(\"<stem>\", cdr=\"<project>.<dataset>\")\n"
+        "     and tell Claude the variable name so it joins CDR_ENV_CANDIDATES.\n"
+        "  2. Otherwise find it in the Workbench UI (the dataset your cohort queries\n"
+        "     reference) and export it before starting the kernel:\n"
+        "         export SRP_CDR=<project>.<dataset>\n\n"
+        "Do not hard-code the project ID into the SQL."
     )
 
 
@@ -110,7 +179,7 @@ class Session:
     notebook: str
     CDR: str
     CDR_INDEX: str
-    CDR_ENV_VAR: str
+    CDR_SOURCE: str
     FIGURES: Path
     CACHE_DIR: Path
     _reader: Callable | None = field(default=None, repr=False)
@@ -175,16 +244,21 @@ def _default_reader(sql: str):
         )
 
 
-def init(notebook: str, verbose: bool = True, reader: Callable | None = None) -> Session:
+def init(notebook: str, verbose: bool = True, reader: Callable | None = None,
+         cdr: str | None = None, cdr_index: str | None = None) -> Session:
     """Resolve datasets, create the notebook's git-ignored output dirs, and report.
 
     `notebook` is the notebook's filename stem; its figure folder is named
     '<notebook>_figures/' per the repo layout convention. `reader` overrides the
-    BigQuery reader, for tests.
+    BigQuery reader, for tests. `cdr` / `cdr_index` override resolution and
+    discovery respectively -- escape hatches for a workspace whose variable names
+    are not yet known.
     """
-    cdr_env_var, cdr = resolve_cdr()
-    cdr_index = os.environ.get("WORKSPACE_CDR_INDEX") or discover_cohort_index(
-        cdr, verbose=verbose
+    cdr_source, cdr = resolve_cdr(cdr)
+    cdr_index = (
+        cdr_index
+        or os.environ.get("WORKSPACE_CDR_INDEX")
+        or discover_cohort_index(cdr, verbose=verbose)
     )
 
     figures = Path(f"{notebook}_figures")
@@ -193,12 +267,12 @@ def init(notebook: str, verbose: bool = True, reader: Callable | None = None) ->
     cache_dir.mkdir(exist_ok=True)
 
     session = Session(
-        notebook=notebook, CDR=cdr, CDR_INDEX=cdr_index, CDR_ENV_VAR=cdr_env_var,
+        notebook=notebook, CDR=cdr, CDR_INDEX=cdr_index, CDR_SOURCE=cdr_source,
         FIGURES=figures, CACHE_DIR=cache_dir, _reader=reader,
     )
 
     if verbose:
-        print(f"CDR         : {cdr}   (from ${cdr_env_var})")
+        print(f"CDR         : {cdr}   (from {cdr_source})")
         print(f"Cohort index: {cdr_index}")
         print(f"Figures     : {figures}/")
         print(f"Cache       : {cache_dir}/")
