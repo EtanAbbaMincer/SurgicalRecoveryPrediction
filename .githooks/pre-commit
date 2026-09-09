@@ -7,7 +7,10 @@ Two independent checks on the *staged* content (i.e. exactly what would be
 committed, after any clean filter has run):
 
   1. No staged .ipynb may contain cell outputs or execution counts.
-  2. No staged file may have a data-bearing extension.
+  2. No staged file may have a data-bearing extension, except a figure that passed
+     small-cell suppression: <name>_suppressed.{png,svg,pdf}. Unsuppressed working
+     figures stay out -- they can carry a cell under the threshold, and a PNG cannot
+     be reviewed in a diff or unpushed once in history.
 
 Check 1 deliberately duplicates the nbstripout clean filter. The filter is
 configured in .git/config, which is NOT part of a clone -- so on a fresh clone
@@ -29,6 +32,22 @@ DATA_EXTS = {
     ".json", ".zip", ".gz", ".png", ".jpg", ".jpeg", ".svg", ".pdf",
 }
 ALLOWED_JSON = {".claude/", ".vscode/"}  # config, not data
+
+# Figures that passed small-cell suppression are committable: All of Us dissemination
+# policy permits aggregate results meeting the threshold to leave the workspace. Only
+# the *_suppressed.* variants qualify -- that name is written solely by the
+# suppress=True plotting path, which is the actual control.
+#
+# Deliberately keyed on the filename alone, not on the containing directory, so this
+# keeps working if the directory layout changes.
+FIGURE_EXTS = {".png", ".svg", ".pdf"}
+
+
+def is_allowed_figure(path):
+    """True for a figure whose name marks it as having passed suppression."""
+    name = path.rsplit("/", 1)[-1].lower()
+    stem, dot, ext = name.rpartition(".")
+    return bool(dot) and f".{ext}" in FIGURE_EXTS and stem.endswith("_suppressed")
 
 
 def staged_files():
@@ -75,6 +94,15 @@ def main():
         ext = lower[dot:] if dot != -1 else ""
         if ext in DATA_EXTS:
             if ext == ".json" and any(path.startswith(p) for p in ALLOWED_JSON):
+                continue
+            if ext in FIGURE_EXTS:
+                if is_allowed_figure(path):
+                    continue
+                violations.append((
+                    path,
+                    "figure is not a suppressed variant -- only "
+                    "<name>_suppressed.{png,svg,pdf} may be committed",
+                ))
                 continue
             violations.append((path, f"data-bearing file type ({ext})"))
 

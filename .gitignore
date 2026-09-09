@@ -39,8 +39,8 @@
 # data or derived output regardless of what extension is inside them.
 # =====================================================================
 
-# Per-notebook figure output folders (<notebook>_figures/)
-*_figures/
+# Per-notebook figure output folders need no rule of their own: the deny-by-default
+# `*` above already hides them, and image extensions are denied again below.
 
 # Query caches / materialized extracts
 _cache/
@@ -77,6 +77,26 @@ __pycache__/
 .venv/
 venv/
 .DS_Store
+
+# =====================================================================
+# Suppressed figures ARE committable.
+#
+# All of Us dissemination policy permits aggregate results that meet the small-cell
+# threshold to leave the workspace, so a figure whose every cell clears it is not
+# "data" in the sense the DUA prohibits. Only the *_suppressed.* variants qualify:
+# that name is written solely by the suppress=True plotting path, which aggregates the
+# sparse tail into a bucket meeting the threshold.
+#
+# Unsuppressed working figures stay ignored. They are the ones that can carry a cell
+# under the threshold, and a PNG cannot be reviewed in a diff or removed from history
+# after a push.
+#
+# These patterns contain NO slash, so they match at any depth and keep working if the
+# directory layout changes. Do not add a path to them.
+# =====================================================================
+!*_suppressed.png
+!*_suppressed.svg
+!*_suppressed.pdf
 
 # =====================================================================
 # Final override: Claude project config stays tracked even though the
