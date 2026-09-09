@@ -106,3 +106,7 @@ venv/
 # =====================================================================
 !/.claude/
 !/.claude/**
+
+# ...except worktrees: EnterWorktree/forks create full repo checkouts under here, and
+# .claude/** would otherwise make them committable.
+/.claude/worktrees/
