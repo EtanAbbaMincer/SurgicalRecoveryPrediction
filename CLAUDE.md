@@ -56,9 +56,19 @@ auto-selecting the newest CDR would shift results underneath a finished analysis
 All of Us publishes a release. Bump it as an explicit commit and re-run affected
 notebooks -- cache keys include the CDR, so they miss.
 
+**The cohort index dataset is pinned too.** Discovery would need
+`bigquery.datasets.get` on the CDR's project, and All of Us grants read on the curated
+tables without granting metadata access -- `INFORMATION_SCHEMA.SCHEMATA` returns 403
+there. So `PINNED_COHORT_INDEX` is set explicitly and **must be updated when you rebuild
+the cohort** (trigger: a rebuild, not a CDR release).
+
+Because both are hand-pinned they can drift, so `init` checks that the index dataset is
+named `<CDR dataset>_index_<build stamp>` and raises if not -- that catches bumping the
+CDR without rebuilding the cohort, which would otherwise run fine and quietly return the
+previous release's cohort. Pass `strict_index=False` if a mismatch is deliberate.
+
 Resolution order is explicit argument -> environment variable -> `cdr_config.PINNED_CDR`.
-To see what the workspace can reach: `srp_common.list_cdr_datasets()`. One-off override
-without a commit:
+One-off override without a commit:
 
 ```python
 cfg = srp_common.init("<stem>", cdr="<project>.<dataset>")

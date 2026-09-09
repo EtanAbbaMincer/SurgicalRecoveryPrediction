@@ -159,11 +159,15 @@ def _pinned(name: str):
 
 
 def list_cdr_datasets(project: str | None = None):
-    """List datasets in the workspace project that look like a CDR or cohort index.
+    """List datasets in `project` that look like a CDR or cohort index.
 
-    Use this to find the value for cdr_config.PINNED_CDR. The project is taken from
-    Application Default Credentials when not given, since Verily Workbench does not
-    set GOOGLE_CLOUD_PROJECT.
+    CAVEAT: with no argument this uses the project from Application Default
+    Credentials, which in Verily Workbench is the project queries BILL from -- not the
+    All of Us-managed project that HOLDS the CDR. Listing the data project usually
+    fails with 403, because read access to the curated tables does not include
+    'bigquery.datasets.get'. So this is a convenience for workspaces where metadata
+    access exists; where it does not, read the dataset names out of the cohort-builder
+    SQL and pin them in cdr_config.py.
     """
     import pandas_gbq
 
@@ -220,7 +224,24 @@ def discover_cohort_index(cdr: str, verbose: bool = True) -> str:
         WHERE STARTS_WITH(schema_name, '{dataset}_index_')
         ORDER BY creation_time DESC
     """
-    candidates = pandas_gbq.read_gbq(sql, dialect="standard", progress_bar_type=None)
+    try:
+        candidates = pandas_gbq.read_gbq(sql, dialect="standard", progress_bar_type=None)
+    except Exception as exc:
+        # Enumerating datasets needs 'bigquery.datasets.get' on the project that HOLDS
+        # the CDR. All of Us grants read on the curated tables without granting metadata
+        # access, so this is expected to fail in Verily Workbench -- and it is not worth
+        # a traceback the caller cannot act on.
+        raise RuntimeError(
+            f"Cannot discover the cohort index dataset in project '{project}': "
+            f"{type(exc).__name__}: {exc}\n\n"
+            "This is usually a permissions boundary, not a bug: the CDR project grants "
+            "read access to the curated tables but not 'bigquery.datasets.get', so its "
+            "INFORMATION_SCHEMA cannot be queried. Pin the dataset instead:\n\n"
+            f"    # cdr_config.py\n"
+            f"    PINNED_COHORT_INDEX = \"{project}.{dataset}_index_<build stamp>\"\n\n"
+            "The build stamp appears in the cohort-builder SQL that Workbench generates "
+            "(look for the '_index_' dataset). Update it when you rebuild the cohort."
+        ) from exc
 
     if candidates.empty:
         raise RuntimeError(
@@ -309,15 +330,42 @@ def _default_reader(sql: str):
         )
 
 
+def _assert_index_matches_cdr(cdr: str, cdr_index: str) -> None:
+    """Fail if the cohort index dataset does not belong to the CDR being queried.
+
+    Both are pinned by hand, so they can drift apart: bump PINNED_CDR to a new release
+    and forget PINNED_COHORT_INDEX, and the queries join the NEW curated tables to the
+    OLD cohort's index tables. That usually executes without error and yields the
+    previous release's cohort -- silently wrong, which is the worst outcome. The index
+    dataset is named '<CDR dataset>_index_<build stamp>', so the mismatch is detectable
+    without any metadata permission.
+    """
+    cdr_dataset = cdr.partition(".")[2]
+    index_dataset = cdr_index.partition(".")[2]
+    if index_dataset.startswith(f"{cdr_dataset}_index_"):
+        return
+    raise RuntimeError(
+        f"Cohort index does not match the CDR.\n"
+        f"    CDR        : {cdr}\n"
+        f"    cohort index: {cdr_index}\n\n"
+        f"The index dataset should be named '{cdr_dataset}_index_<build stamp>'. This "
+        "almost always means the CDR was bumped without rebuilding the cohort against "
+        "it. Rebuild the cohort in the Workbench cohort builder, then set the new "
+        "'_index_' dataset as PINNED_COHORT_INDEX in cdr_config.py.\n\n"
+        "If the mismatch is deliberate, pass strict_index=False."
+    )
+
+
 def init(notebook: str, verbose: bool = True, reader: Callable | None = None,
-         cdr: str | None = None, cdr_index: str | None = None) -> Session:
+         cdr: str | None = None, cdr_index: str | None = None,
+         strict_index: bool = True) -> Session:
     """Resolve datasets, create the notebook's git-ignored output dirs, and report.
 
     `notebook` is the notebook's filename stem; its figure folder is named
     '<notebook>_figures/' per the repo layout convention. `reader` overrides the
     BigQuery reader, for tests. `cdr` / `cdr_index` override resolution and
-    discovery respectively -- escape hatches for a workspace whose variable names
-    are not yet known.
+    discovery respectively. `strict_index` checks that the cohort index dataset
+    belongs to the resolved CDR; leave it on unless the mismatch is deliberate.
     """
     cdr_source, cdr = resolve_cdr(cdr)
     cdr_index = (
@@ -326,6 +374,9 @@ def init(notebook: str, verbose: bool = True, reader: Callable | None = None,
         or _pinned("PINNED_COHORT_INDEX")
         or discover_cohort_index(cdr, verbose=verbose)
     )
+
+    if strict_index:
+        _assert_index_matches_cdr(cdr, cdr_index)
 
     figures = Path(f"{notebook}_figures")
     cache_dir = Path("_cache")
