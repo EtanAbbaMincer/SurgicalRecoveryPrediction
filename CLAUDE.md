@@ -49,12 +49,19 @@ discovery, and the Parquet-cached BigQuery reader -- imported by each notebook r
 copy-pasted. Notebooks find it by walking up from `cwd`, so they run from either the task
 directory or the root:
 
-If the CDR cannot be resolved from the environment, `init` raises and prints every
-environment variable that might carry it. Pass it explicitly to get moving, and add the real
-variable name to `CDR_ENV_CANDIDATES` in `srp_common.py` once known:
+**Verily Workbench does not publish the CDR through the environment** -- there is no
+`WORKSPACE_CDR` and no `GOOGLE_CLOUD_PROJECT`. So the dataset is **pinned in
+`cdr_config.py`** at the repo root, which is committed. Pinning is deliberate:
+auto-selecting the newest CDR would shift results underneath a finished analysis when
+All of Us publishes a release. Bump it as an explicit commit and re-run affected
+notebooks -- cache keys include the CDR, so they miss.
+
+Resolution order is explicit argument -> environment variable -> `cdr_config.PINNED_CDR`.
+To see what the workspace can reach: `srp_common.list_cdr_datasets()`. One-off override
+without a commit:
 
 ```python
-cfg = srp_common.init("<stem>", cdr="<project>.<dataset>")        # CDR override
+cfg = srp_common.init("<stem>", cdr="<project>.<dataset>")
 cfg = srp_common.init("<stem>", cdr_index="<project>.<dataset>")  # skip index discovery
 ```
 

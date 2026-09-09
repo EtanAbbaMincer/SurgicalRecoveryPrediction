@@ -41,6 +41,7 @@ __all__ = [
     "Session",
     "discover_cohort_index",
     "init",
+    "list_cdr_datasets",
     "resolve_cdr",
 ]
 
@@ -110,7 +111,15 @@ def resolve_cdr(cdr: str | None = None) -> tuple[str, str]:
             + "\n".join(f"    {k} = {v}" for k, v in sorted(discovered.items()))
         )
 
-    # Nothing found. Report what IS in the environment so the next run resolves it.
+    pinned = _pinned("PINNED_CDR")
+    if pinned:
+        if not _looks_like_dataset(pinned):
+            raise ValueError(
+                f"cdr_config.PINNED_CDR={pinned!r} does not look like 'project.dataset'."
+            )
+        return "cdr_config.PINNED_CDR", pinned
+
+    # Nothing found anywhere. Report what IS in the environment so this is diagnosable.
     nearby = {
         k: v for k, v in sorted(os.environ.items())
         if any(h in k.upper() for h in
@@ -119,19 +128,75 @@ def resolve_cdr(cdr: str | None = None) -> tuple[str, str]:
     listing = ("\n".join(f"    {k} = {v}" for k, v in nearby.items())
                if nearby else "    (no plausibly related variables found)")
     raise RuntimeError(
-        "Could not resolve the CDR dataset. Tried the known names ("
-        + ", ".join(CDR_ENV_CANDIDATES)
-        + ") and pattern-matched every environment key.\n\n"
-        "Environment variables that might carry it:\n" + listing + "\n\n"
-        "Fix one of two ways:\n"
-        "  1. If one of the above is the CDR, pass it for now:\n"
-        "         cfg = srp_common.init(\"<stem>\", cdr=\"<project>.<dataset>\")\n"
-        "     and tell Claude the variable name so it joins CDR_ENV_CANDIDATES.\n"
-        "  2. Otherwise find it in the Workbench UI (the dataset your cohort queries\n"
-        "     reference) and export it before starting the kernel:\n"
-        "         export SRP_CDR=<project>.<dataset>\n\n"
+        "Could not resolve the CDR dataset. Tried: an explicit cdr= argument, the "
+        "known variable names (" + ", ".join(CDR_ENV_CANDIDATES) + "), a pattern "
+        "match over every environment key, and cdr_config.PINNED_CDR.\n\n"
+        "Environment variables that might have carried it:\n" + listing + "\n\n"
+        "Verily Workbench does not publish the CDR through the environment, so the "
+        "normal fix is to pin it:\n\n"
+        "  1. Set PINNED_CDR in cdr_config.py at the repo root. Commit it -- a dataset\n"
+        "     identifier is configuration, not participant data, and pinning is what\n"
+        "     makes the analysis reproducible across CDR releases.\n"
+        "  2. Not sure of the name? List what the workspace can see:\n"
+        "         import srp_common; srp_common.list_cdr_datasets()\n"
+        "  3. One-off override, no commit:\n"
+        "         cfg = srp_common.init(\"<stem>\", cdr=\"<project>.<dataset>\")\n\n"
         "Do not hard-code the project ID into the SQL."
     )
+
+
+def _pinned(name: str):
+    """Read `name` from cdr_config.py if that module is importable, else None.
+
+    Optional by design: a checkout without the file still works via an explicit
+    argument or an environment variable.
+    """
+    try:
+        import cdr_config
+    except ImportError:
+        return None
+    return getattr(cdr_config, name, None)
+
+
+def list_cdr_datasets(project: str | None = None):
+    """List datasets in the workspace project that look like a CDR or cohort index.
+
+    Use this to find the value for cdr_config.PINNED_CDR. The project is taken from
+    Application Default Credentials when not given, since Verily Workbench does not
+    set GOOGLE_CLOUD_PROJECT.
+    """
+    import pandas_gbq
+
+    if project is None:
+        try:
+            import google.auth
+
+            _, project = google.auth.default()
+        except Exception as exc:
+            raise RuntimeError(
+                "Could not determine the BigQuery project from Application Default "
+                f"Credentials ({exc}). Pass it: list_cdr_datasets(project='...')."
+            ) from exc
+    if not project:
+        raise RuntimeError(
+            "Application Default Credentials carry no project. Pass it explicitly: "
+            "list_cdr_datasets(project='...')."
+        )
+
+    sql = f"""
+        SELECT schema_name, creation_time
+        FROM `{project}`.INFORMATION_SCHEMA.SCHEMATA
+        ORDER BY creation_time DESC
+    """
+    datasets = pandas_gbq.read_gbq(sql, dialect="standard", progress_bar_type=None)
+    print(f"project: {project}   ({len(datasets)} dataset(s))")
+    print("Candidates for cdr_config.PINNED_CDR are the ones WITHOUT an '_index_' "
+          "suffix:\n")
+    for _, row in datasets.iterrows():
+        kind = "cohort index" if "_index_" in row["schema_name"] else "CDR candidate"
+        print(f"    {project}.{row['schema_name']:38s} {kind:14s} "
+              f"created {row['creation_time']}")
+    return datasets
 
 
 def discover_cohort_index(cdr: str, verbose: bool = True) -> str:
@@ -258,6 +323,7 @@ def init(notebook: str, verbose: bool = True, reader: Callable | None = None,
     cdr_index = (
         cdr_index
         or os.environ.get("WORKSPACE_CDR_INDEX")
+        or _pinned("PINNED_COHORT_INDEX")
         or discover_cohort_index(cdr, verbose=verbose)
     )
 
