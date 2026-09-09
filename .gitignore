@@ -1,0 +1,88 @@
+# =====================================================================
+# All of Us DUA: ONLY plain code may be committed. NO data, ever.
+# Therefore: deny by default, whitelist code + Claude files + notebooks.
+# =====================================================================
+
+# Ignore everything...
+*
+
+# ...but descend into directories so the whitelists below can be evaluated.
+# (Without this, git never looks inside a directory to find allowed files.)
+!*/
+
+# --- Allowed: repo + Claude config ---
+!/.gitignore
+!/CLAUDE.md
+!/.claude/
+!/.claude/**
+!**/*.md
+
+# --- Allowed: plain code ---
+!**/*.ipynb
+!**/*.py
+!**/*.sql
+!**/*.R
+!**/*.r
+
+# --- Allowed: environment declarations ---
+!/requirements.txt
+!/environment.yml
+!/pyproject.toml
+
+# --- Allowed: git plumbing that ENFORCES this policy (must stay committed) ---
+!/.gitattributes
+!/.githooks/
+!/.githooks/**
+
+# =====================================================================
+# Re-ignored AFTER the whitelists (last match wins), because these hold
+# data or derived output regardless of what extension is inside them.
+# =====================================================================
+
+# Per-notebook figure output folders (<notebook>_figures/)
+*_figures/
+
+# Query caches / materialized extracts
+_cache/
+.cache/
+
+# Belt-and-braces: data file types, in case a whitelist is ever widened
+*.csv
+*.tsv
+*.parquet
+*.feather
+*.xlsx
+*.dta
+*.sav
+*.db
+*.sqlite
+*.pkl
+*.pickle
+*.npy
+*.npz
+*.h5
+*.hdf5
+*.json
+
+# Credentials
+.env
+*.key
+*.pem
+.credentials.json
+
+# Python / Jupyter noise
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
+.venv/
+venv/
+.DS_Store
+
+# =====================================================================
+# Final override: Claude project config stays tracked even though the
+# data-type denials above (notably *.json) would otherwise catch it.
+# Last match wins, so this must remain the LAST block in this file.
+# Do not put data files under .claude/.
+# =====================================================================
+!/.claude/
+!/.claude/**

@@ -1,0 +1,6 @@
+# Analysis environment for SurgicalRecoveryPrediction.
+# Pin versions before any results are reported — reproducibility is a DUA-adjacent concern.
+
+# Enforces the DUA "no data in git" rule by stripping notebook outputs on commit.
+# After installing, run:  nbstripout --install --attributes .gitattributes
+nbstripout==0.9.1

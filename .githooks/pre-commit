@@ -1,0 +1,109 @@
+#!/usr/bin/env python3
+"""Pre-commit DUA guard for SurgicalRecoveryPrediction.
+
+All of Us DUA: only plain code may be committed. No data.
+
+Two independent checks on the *staged* content (i.e. exactly what would be
+committed, after any clean filter has run):
+
+  1. No staged .ipynb may contain cell outputs or execution counts.
+  2. No staged file may have a data-bearing extension.
+
+Check 1 deliberately duplicates the nbstripout clean filter. The filter is
+configured in .git/config, which is NOT part of a clone -- so on a fresh clone
+(e.g. a new Verily Workbench workspace) the filter is silently absent and
+notebooks would commit with outputs intact. This hook is versioned in the repo,
+so it travels; it turns that silent failure into a loud one.
+
+Stdlib only, so it works with no dependencies installed.
+
+Enable (once per clone):   git config core.hooksPath .githooks
+"""
+import json
+import subprocess
+import sys
+
+DATA_EXTS = {
+    ".csv", ".tsv", ".parquet", ".feather", ".xlsx", ".xls", ".dta", ".sav",
+    ".db", ".sqlite", ".pkl", ".pickle", ".npy", ".npz", ".h5", ".hdf5",
+    ".json", ".zip", ".gz", ".png", ".jpg", ".jpeg", ".svg", ".pdf",
+}
+ALLOWED_JSON = {".claude/", ".vscode/"}  # config, not data
+
+
+def staged_files():
+    out = subprocess.run(
+        ["git", "diff", "--cached", "--name-only", "--diff-filter=ACMR"],
+        capture_output=True, text=True, check=True,
+    ).stdout
+    return [p for p in out.splitlines() if p.strip()]
+
+
+def staged_blob(path):
+    return subprocess.run(
+        ["git", "show", f":{path}"], capture_output=True, check=True,
+    ).stdout
+
+
+def notebook_has_output(path):
+    """Return a list of human-readable offences for a staged notebook."""
+    try:
+        nb = json.loads(staged_blob(path).decode("utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        return [f"could not parse as JSON ({exc.__class__.__name__})"]
+    offences = []
+    for i, cell in enumerate(nb.get("cells", [])):
+        if cell.get("outputs"):
+            offences.append(f"cell {i}: {len(cell['outputs'])} saved output(s)")
+        if cell.get("execution_count") is not None:
+            offences.append(f"cell {i}: execution_count is set")
+    return offences
+
+
+def main():
+    violations = []
+
+    for path in staged_files():
+        lower = path.lower()
+
+        if lower.endswith(".ipynb"):
+            for offence in notebook_has_output(path):
+                violations.append((path, offence))
+            continue
+
+        dot = lower.rfind(".")
+        ext = lower[dot:] if dot != -1 else ""
+        if ext in DATA_EXTS:
+            if ext == ".json" and any(path.startswith(p) for p in ALLOWED_JSON):
+                continue
+            violations.append((path, f"data-bearing file type ({ext})"))
+
+    if not violations:
+        return 0
+
+    print("\n\033[1;31mCOMMIT BLOCKED — All of Us DUA: plain code only, no data.\033[0m\n")
+    for path, why in violations:
+        print(f"  {path}\n      {why}")
+    print("""
+Notebook outputs embed rendered tables and figures, which is data. A committed
+notebook must carry code and markdown only; figures belong in the git-ignored
+<notebook>_figures/ folder.
+
+To fix:
+
+  1. Install the strip filter so this is automatic:
+         pip install nbstripout && nbstripout --install --attributes .gitattributes
+     then re-stage:
+         git add --renormalize .
+
+  2. Or clear outputs by hand (Jupyter: Kernel > Restart & Clear Output) and re-stage.
+
+  3. For a data file staged with -f: unstage it. It belongs in .gitignore.
+
+This check is a compliance control. Do not bypass it with --no-verify.
+""")
+    return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
