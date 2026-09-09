@@ -19,6 +19,12 @@ pip install -r requirements.txt && nbstripout --install --attributes .gitattribu
 git config core.hooksPath .githooks
 ```
 
+**Suppressed figures are the exception.** Aggregates meeting the All of Us small-cell
+threshold may leave the workspace, so `*_suppressed.{png,svg,pdf}` is committable; every
+other image is ignored and rejected by the hook. Both rules key on the filename, never a
+directory path. The threshold is not the whole policy — subgroup and
+variable-combination rules also apply.
+
 Never use `git commit --no-verify` here. Details in `allofus-data-governance`.
 
 Two skills govern this repo. Consult them rather than relying on this summary:
@@ -38,7 +44,7 @@ Task-scoped directories at the repo root, one notebook per variable, no filename
 ```
 compliance/
   bmi.ipynb
-  bmi_figures/            <- git-ignored
+  bmi_figures/            <- *_suppressed.png committable; other figures git-ignored
   blood_pressure.ipynb
   blood_pressure_figures/
   _cache/                 <- git-ignored
