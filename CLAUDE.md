@@ -44,6 +44,18 @@ compliance/
   _cache/                 <- git-ignored
 ```
 
+Shared code lives in **`srp_common.py` at the repo root** -- CDR resolution, cohort-index
+discovery, and the Parquet-cached BigQuery reader -- imported by each notebook rather than
+copy-pasted. Notebooks find it by walking up from `cwd`, so they run from either the task
+directory or the root:
+
+```python
+cfg = srp_common.init("<notebook stem>")
+CDR, CDR_INDEX = cfg.CDR, cfg.CDR_INDEX
+FIGURES, CACHE_DIR = cfg.FIGURES, cfg.CACHE_DIR
+cached_gbq = cfg.cached_gbq
+```
+
 Invoke `pipeline-manager` before creating a directory or notebook, or when deciding where a new
 file belongs.
 
