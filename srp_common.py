@@ -37,12 +37,41 @@ from typing import Callable
 
 __all__ = [
     "CDR_ENV_CANDIDATES",
-    "resolve_cdr",
     "Session",
     "discover_cohort_index",
     "init",
     "list_cdr_datasets",
     "resolve_cdr",
+    # cohort SQL
+    "SURGERY_ANCESTOR_CONCEPT_ID",
+    "SURGERY_ANCESTOR_SNOMED_CODE",
+    "INDEX_RULES",
+    "DEFAULT_WINDOWS",
+    "cohort_ctes",
+    "window_case_sql",
+    # figures and suppression
+    "SUPPRESS_THRESHOLD",
+    "SURFACE",
+    "INK",
+    "INK_MUTED",
+    "GRID",
+    "CATEGORICAL",
+    "SERIES",
+    "STATUS",
+    "verdict_label",
+    "collapse_small_cells",
+    "min_cell",
+    "style_axes",
+    # index hospitalisation and probes
+    "INPATIENT_VISIT_CONCEPT_IDS",
+    "index_visit_cte",
+    "columns_sql",
+    # scorecard hand-off
+    "write_scorecard",
+    "read_scorecards",
+    # plotters
+    "plot_rel_day_curve",
+    "plot_distribution",
 ]
 
 CDR_ENV_CANDIDATES = (
@@ -310,6 +339,63 @@ class Session:
         return df
 
 
+    def cohort_ctes(self, index_rule: str = "first", extra: str = "") -> str:
+        """Cohort + index-surgery CTE prefix for this session's datasets."""
+        return cohort_ctes(self, index_rule=index_rule, extra=extra)
+
+    def dry_run_bytes(self, sql: str) -> int:
+        """Bytes BigQuery would scan for `sql`, without running or billing it.
+
+        Cheap insurance against an accidental full scan of a minute-level Fitbit
+        table. Returns -1 rather than raising if the dry run itself fails, since a
+        missing estimate should not stop an otherwise valid notebook.
+        """
+        try:
+            from google.cloud import bigquery
+
+            client = bigquery.Client()
+            job = client.query(
+                sql,
+                job_config=bigquery.QueryJobConfig(dry_run=True, use_query_cache=False),
+            )
+            processed = int(job.total_bytes_processed)
+            print(f"dry run: {processed / 2**30:,.2f} GiB would be scanned")
+            return processed
+        except Exception as exc:
+            print(f"dry run unavailable ({type(exc).__name__}: {exc})")
+            return -1
+
+    def figure_path(self, name: str, suppress: bool) -> Path:
+        """Figure filename, with the '_suppressed' suffix derived from the flag.
+
+        The suffix is what .gitignore and the pre-commit hook key on, so it must be
+        written by the suppressing code path and never by a caller-supplied string --
+        otherwise an unsuppressed figure can claim a suppression that did not happen.
+        """
+        return self.FIGURES / f"{name}{'_suppressed' if suppress else ''}.png"
+
+    def save_figure(self, fig, name: str, suppress: bool, note: str = "") -> Path:
+        """Stamp the provenance footer onto `fig`, save it, and say what it may be.
+
+        The footer carries the CDR so a figure is never separated from the release it
+        came from, and states in the image itself whether suppression was applied.
+        """
+        status = (f"suppressed at the {SUPPRESS_THRESHOLD}-participant threshold"
+                  if suppress else
+                  f"NOT suppressed -- may contain cells below {SUPPRESS_THRESHOLD}; "
+                  "do not share this version")
+        footer = f"All of Us  |  CDR {self.CDR}  |  {status}"
+        if note:
+            footer += f"  |  {note}"
+        fig.text(0.01, 0.005, footer, fontsize=8, color=INK_MUTED)
+
+        out = self.figure_path(name, suppress)
+        fig.savefig(out, dpi=150, bbox_inches="tight", facecolor=SURFACE)
+        print(f"saved -> {out}"
+              + ("   (committable)" if suppress else "   (local only, git-ignored)"))
+        return out
+
+
 def _default_reader(sql: str):
     """Read via pandas_gbq, preferring the BigQuery Storage API.
 
@@ -395,3 +481,487 @@ def init(notebook: str, verbose: bool = True, reader: Callable | None = None,
         print(f"Cache       : {cache_dir}/")
 
     return session
+
+
+# ===========================================================================
+# Cohort and index-surgery SQL
+#
+# Every notebook that measures something "relative to the surgery" needs the same
+# three things: the surgical concept set, the built cohort, and one index date per
+# patient. Duplicating that across notebooks is how two notebooks end up silently
+# analysing different cohorts -- the SQL still executes, it just answers a different
+# question -- so it is defined once here and imported.
+# ===========================================================================
+
+# SNOMED 387713003, "Surgical procedure". Its descendants define "a surgery" for this
+# project. Referenced by standard concept ID rather than code string so the concept set
+# survives a vocabulary update; the code is recorded alongside it for human review.
+SURGERY_ANCESTOR_CONCEPT_ID = 4301351
+SURGERY_ANCESTOR_SNOMED_CODE = "387713003"
+
+# How to collapse a patient's several surgery-days into one index date. Which rule is
+# correct is still open -- that is what index_surgery/surgery_day_distribution.ipynb is
+# for -- so it is a parameter, not a constant, and every notebook records the rule it
+# used. "first" is the provisional default because it is the only rule that cannot be
+# influenced by post-operative events.
+INDEX_RULES = {
+    "first": "MIN",
+    "last": "MAX",
+}
+
+# Windows in days relative to the index date, half-open on neither end: both bounds are
+# inclusive. Shared so that "coverage in the baseline window" means the same thing in
+# every outcome notebook and the metrics stay comparable. The pre-operative baseline
+# stops at day -8 deliberately, to exclude the week before surgery, when activity is
+# already depressed by the condition being operated on.
+DEFAULT_WINDOWS = {
+    "baseline": (-30, -8),
+    "periop": (-7, -1),
+    "acute": (0, 13),
+    "early": (14, 29),
+    "recovery": (30, 89),
+    "late": (90, 179),
+}
+
+
+def cohort_ctes(cfg: "Session", index_rule: str = "first",
+                extra: str = "") -> str:
+    """Return a 'WITH ...' prefix defining the cohort and one index date per patient.
+
+    Defines four CTEs, each usable by the query that follows:
+
+        surgical_concept  concept_id      -- the ancestor plus every descendant
+        cohort            person_id       -- EHR + Fitbit + >=1 qualifying procedure
+        surgical_events   person_id, surgery_date
+        index_surgery     person_id, index_date, n_surgery_days
+
+    Membership is read from the cohort-builder index tables rather than re-derived,
+    so a notebook cannot drift from the cohort that was actually built. `extra` is
+    appended as further comma-separated CTEs when a notebook needs its own.
+
+    `index_rule` must be a key of INDEX_RULES; it is interpolated as an aggregate
+    function name, never as user text, and an unknown value raises rather than
+    producing SQL.
+    """
+    try:
+        agg = INDEX_RULES[index_rule]
+    except KeyError:
+        raise ValueError(
+            f"index_rule={index_rule!r} is not one of {sorted(INDEX_RULES)}."
+        ) from None
+
+    ctes = f"""
+    surgical_concept AS (
+        SELECT descendant AS concept_id
+        FROM `{cfg.CDR_INDEX}`.T_HAD_procedureConcept_default
+        WHERE ancestor = {SURGERY_ANCESTOR_CONCEPT_ID}
+        UNION ALL
+        SELECT {SURGERY_ANCESTOR_CONCEPT_ID}
+    ),
+    cohort AS (
+        SELECT id AS person_id
+        FROM `{cfg.CDR_INDEX}`.T_ENT_person
+        WHERE has_ehr_data = true
+          AND has_fitbit = true
+          AND id IN (
+              SELECT person_id
+              FROM `{cfg.CDR_INDEX}`.T_ENT_procedureOccurrence
+              WHERE procedure_concept_id IN (SELECT concept_id FROM surgical_concept)
+          )
+    ),
+    surgical_events AS (
+        SELECT
+            po.person_id,
+            DATE(po.procedure_datetime) AS surgery_date
+        FROM `{cfg.CDR}`.procedure_occurrence AS po
+        WHERE po.person_id IN (SELECT person_id FROM cohort)
+          AND po.procedure_concept_id IN (SELECT concept_id FROM surgical_concept)
+          AND po.procedure_datetime IS NOT NULL
+    ),
+    index_surgery AS (
+        SELECT
+            person_id,
+            {agg}(surgery_date) AS index_date,
+            COUNT(DISTINCT surgery_date) AS n_surgery_days
+        FROM surgical_events
+        GROUP BY person_id
+    )"""
+
+    if extra:
+        ctes = ctes + ",\n" + extra.strip().rstrip(",")
+    return "WITH" + ctes + "\n"
+
+
+def window_case_sql(column: str = "rel_day", windows: dict | None = None) -> str:
+    """Return a CASE expression labelling `column` with its DEFAULT_WINDOWS bucket.
+
+    Days that fall in no window -- the gaps between buckets and anything outside the
+    outermost bounds -- evaluate to NULL, so a downstream GROUP BY silently drops them
+    rather than inventing an "other" category that would be read as a real window.
+    """
+    windows = windows or DEFAULT_WINDOWS
+    arms = "\n".join(
+        f"            WHEN {column} BETWEEN {lo} AND {hi} THEN '{name}'"
+        for name, (lo, hi) in windows.items()
+    )
+    return "CASE\n" + arms + "\n        END"
+
+
+# ===========================================================================
+# Figures, palette and small-cell suppression
+#
+# One implementation of suppression, shared by every notebook. The point is not
+# convenience: a second copy is a second chance to get the threshold wrong, and the
+# rule that a "_suppressed" filename can only be written by the suppressing code path
+# only holds if there is exactly one such path.
+# ===========================================================================
+
+# All of Us Data and Statistics Dissemination Policy, historical threshold. CONFIRM
+# against current policy before anything is published -- the threshold is also not the
+# whole policy, which additionally covers small subgroups and variable combinations.
+SUPPRESS_THRESHOLD = 20
+
+SURFACE = "#fcfcfb"
+INK = "#0b0b0b"
+INK_MUTED = "#52514e"
+GRID = "#e3e2df"
+
+# Categorical hues in FIXED assignment order -- a series keeps its hue when another is
+# filtered out, and the order is never cycled. Validated on the #fcfcfb surface for the
+# lightness band, chroma floor, all-pairs CVD separation, the normal-vision floor and
+# 3:1 contrast. Adding a fifth hue means re-running that validation, not appending a
+# colour that looks different.
+CATEGORICAL = ["#2a78d6", "#c2620a", "#00915f", "#b5309a"]
+SERIES = CATEGORICAL[0]
+
+# Status colours are reserved and never reused as "series 5". Red/amber/green is not
+# separable under deuteranopia by construction, so anything wearing one of these MUST
+# also carry its verdict as text -- see verdict_label().
+STATUS = {"good": "#1f7a3f", "warning": "#a86a00", "bad": "#b4261e"}
+
+
+def verdict_label(status: str) -> str:
+    """Return the text label that must accompany a STATUS colour, never colour alone."""
+    return {"good": "PASS", "warning": "MARGINAL", "bad": "FAIL"}[status]
+
+
+def collapse_small_cells(df, count_col: str, label_col: str,
+                         threshold: int = SUPPRESS_THRESHOLD,
+                         other_label: str = "other (aggregated)"):
+    """Aggregate every row under `threshold` into one row, and report what moved.
+
+    Returns (kept_df, n_absorbed, absorbed_count). Rows at or above the threshold are
+    returned unchanged and in their original order; the rest are summed into a single
+    appended row. If that aggregate is itself still under the threshold it is dropped
+    entirely rather than shown, because a visible "other" bar of 11 patients discloses
+    just as much as the cells it replaced.
+
+    Aggregating rather than masking is deliberate: a masked cell whose neighbours and
+    total are both published is recoverable by subtraction, and a cumulative curve drawn
+    over masked data leaks the hidden heights through its step sizes.
+    """
+    small = df[count_col] < threshold
+    kept = df.loc[~small].copy()
+    absorbed = df.loc[small]
+
+    if absorbed.empty:
+        return kept, 0, 0
+
+    absorbed_count = int(absorbed[count_col].sum())
+    if absorbed_count < threshold:
+        return kept, len(absorbed), 0
+
+    row = {c: None for c in df.columns}
+    row[label_col] = other_label
+    row[count_col] = absorbed_count
+    import pandas
+
+    kept = pandas.concat([kept, pandas.DataFrame([row])], ignore_index=True)
+    return kept, len(absorbed), absorbed_count
+
+
+def min_cell(df, count_col: str) -> int:
+    """Smallest non-zero count in `count_col` -- what decides if a table may be shared."""
+    values = [int(v) for v in df[count_col] if v and v > 0]
+    return min(values) if values else 0
+
+
+def style_axes(*axes, grid_axis: str = "y") -> None:
+    """Apply the recessive grid, hidden top/right spines and muted ticks to each axis."""
+    for ax in axes:
+        ax.set_facecolor(SURFACE)
+        if grid_axis:
+            ax.grid(axis=grid_axis, color=GRID, linewidth=1, zorder=0)
+            ax.set_axisbelow(True)
+        for side in ("top", "right"):
+            ax.spines[side].set_visible(False)
+        for side in ("left", "bottom"):
+            ax.spines[side].set_color(GRID)
+        ax.tick_params(colors=INK_MUTED, labelsize=9)
+
+
+# ===========================================================================
+# The index hospitalisation
+#
+# Four of the EHR outcome metrics -- length of stay, readmission, days alive and out
+# of hospital, discharge disposition -- all hang off the same object: the inpatient
+# stay the index surgery happened during. Defining it four times is four chances for
+# them to disagree about which stay that was, which would make the metrics
+# incomparable in exactly the notebook meant to compare them.
+# ===========================================================================
+
+# OMOP standard visit concepts: 9201 "Inpatient Visit", 262 "Emergency Room and
+# Inpatient Visit". Day-surgery cases appear as outpatient and are deliberately not
+# included -- they have no stay to measure, and their absence is itself a coverage
+# finding rather than something to paper over.
+INPATIENT_VISIT_CONCEPT_IDS = (9201, 262)
+
+
+def index_visit_cte(cfg: "Session") -> str:
+    """CTE 'index_visit': the inpatient stay containing each patient's index date.
+
+    Pass this to cohort_ctes(extra=...). Patients may have several qualifying stays
+    -- overlapping records are common in claims-derived EHR data -- so `rn` ranks them
+    longest-first and every downstream query filters `rn = 1`. Ties break on the
+    earlier start date, so the choice is deterministic across runs and the query cache
+    stays valid.
+
+    A patient whose index surgery falls in no inpatient stay simply does not appear
+    here, which is what makes the row count of this CTE the coverage denominator for
+    every stay-based metric.
+    """
+    ids = ", ".join(str(i) for i in INPATIENT_VISIT_CONCEPT_IDS)
+    return f"""
+    index_visit AS (
+        SELECT
+            i.person_id,
+            i.index_date,
+            vo.visit_occurrence_id,
+            vo.visit_start_date,
+            vo.visit_end_date,
+            DATE_DIFF(vo.visit_end_date, vo.visit_start_date, DAY) AS los_days,
+            DATE_DIFF(vo.visit_end_date, i.index_date, DAY) AS postop_los_days,
+            ROW_NUMBER() OVER (
+                PARTITION BY i.person_id
+                ORDER BY DATE_DIFF(vo.visit_end_date, vo.visit_start_date, DAY) DESC,
+                         vo.visit_start_date
+            ) AS rn
+        FROM index_surgery AS i
+        JOIN `{cfg.CDR}`.visit_occurrence AS vo
+          ON vo.person_id = i.person_id
+         AND i.index_date BETWEEN vo.visit_start_date
+                              AND COALESCE(vo.visit_end_date, vo.visit_start_date)
+        WHERE vo.visit_concept_id IN ({ids})
+          AND vo.visit_end_date IS NOT NULL
+    )"""
+
+
+def columns_sql(cfg: "Session", tables: "list[str]") -> str:
+    """Query listing the columns of `tables` in the CDR, for an availability probe.
+
+    Table and column names are the one thing a notebook cannot infer, and a wrong
+    guess fails with an opaque BigQuery error hundreds of lines into a run. Probing
+    INFORMATION_SCHEMA first turns that into a readable list. Needs only dataset-level
+    metadata access, which read access to the curated tables normally carries -- unlike
+    the project-level access that cohort-index discovery would need.
+    """
+    quoted = ", ".join(f"'{t}'" for t in tables)
+    return f"""
+        SELECT table_name, column_name, data_type
+        FROM `{cfg.CDR}`.INFORMATION_SCHEMA.COLUMNS
+        WHERE table_name IN ({quoted})
+        ORDER BY table_name, ordinal_position
+    """
+
+
+# ===========================================================================
+# Scorecard hand-off between notebooks
+#
+# The point of an audit is the comparison, and the comparison needs every metric's
+# verdict in one place. Each notebook writes its own one-row summary into the shared
+# task cache; the comparison notebook reads whatever is there. Aggregates only -- a
+# scorecard row is counts and fractions, never participant-level values.
+# ===========================================================================
+
+SCORECARD_PREFIX = "scorecard_"
+
+
+def write_scorecard(cfg: "Session", **fields):
+    """Write this notebook's one-row audit summary into the task cache.
+
+    Keyed by notebook stem, so re-running a notebook replaces its own row and cannot
+    duplicate it. The CDR, cohort index and index rule are stamped in automatically,
+    because a scorecard compared across different values of those would be comparing
+    different analyses.
+    """
+    import pandas
+
+    row = {
+        "metric": cfg.notebook,
+        "CDR": cfg.CDR,
+        "CDR_INDEX": cfg.CDR_INDEX,
+        **fields,
+    }
+    path = cfg.CACHE_DIR / f"{SCORECARD_PREFIX}{cfg.notebook}.parquet"
+    frame = pandas.DataFrame([row])
+    frame.to_parquet(path, index=False)
+    print(f"scorecard -> {path.name}")
+    return frame
+
+
+def read_scorecards(cfg: "Session"):
+    """Read every scorecard in the task cache, newest write order irrelevant.
+
+    Raises if the rows disagree about the CDR or the cohort index, since a comparison
+    across two data releases is not a comparison -- it is a bug that would otherwise
+    produce a plausible-looking table.
+    """
+    import pandas
+
+    paths = sorted(cfg.CACHE_DIR.glob(f"{SCORECARD_PREFIX}*.parquet"))
+    if not paths:
+        raise RuntimeError(
+            f"No scorecards in {cfg.CACHE_DIR}/. Run the per-metric notebooks first; "
+            "each writes its row at the end of its verdict section."
+        )
+    frame = pandas.concat([pandas.read_parquet(p) for p in paths], ignore_index=True)
+
+    for column in ("CDR", "CDR_INDEX"):
+        distinct = sorted(frame[column].dropna().unique())
+        if len(distinct) > 1:
+            raise RuntimeError(
+                f"Scorecards disagree on {column}: {distinct}. Re-run the stale "
+                "notebooks against the current pinned datasets before comparing."
+            )
+
+    return frame.sort_values("metric").reset_index(drop=True)
+
+
+# ===========================================================================
+# Shared plotters
+#
+# Two shapes cover almost every question in the outcome audit: "how many patients
+# have data on day N relative to surgery" and "how many patients fall in each
+# bucket". Both are defined here so that suppression happens in one place and a
+# figure's committability is decided by the same code that drew it.
+# ===========================================================================
+
+
+def _new_figure(height=4.6):
+    import matplotlib.pyplot as plt
+
+    fig, ax = plt.subplots(figsize=(10, height), facecolor=SURFACE)
+    style_axes(ax)
+    return fig, ax
+
+
+def plot_rel_day_curve(cfg, df, value_col, count_col="n_patients", band=None,
+                       title="", ylabel="", suppress=False, save_as=None,
+                       show_windows=True, note=""):
+    """Plot `value_col` against day relative to the index surgery.
+
+    `band` is an optional (low_col, high_col) pair drawn as a shaded interquartile
+    ribbon behind the line. Suppression drops any day whose `count_col` is under the
+    threshold rather than aggregating it, which is correct here because no total is
+    published alongside -- there is nothing for a reader to recover the dropped days
+    by subtraction from.
+
+    Returns (fig, n_days_dropped) so the notebook can report how much of the curve
+    the suppressed version is missing.
+    """
+    import matplotlib.pyplot as plt
+
+    d = df.sort_values("rel_day").reset_index(drop=True)
+    dropped = 0
+    if suppress:
+        keep = d[count_col] >= SUPPRESS_THRESHOLD
+        dropped = int((~keep).sum())
+        d = d.loc[keep].reset_index(drop=True)
+
+    fig, ax = _new_figure()
+
+    if show_windows:
+        for i, (name, (lo, hi)) in enumerate(DEFAULT_WINDOWS.items()):
+            ax.axvspan(lo, hi, color=GRID, alpha=0.45 if i % 2 == 0 else 0.22,
+                       linewidth=0, zorder=0)
+            ax.text((lo + hi) / 2, 1.005, name, transform=ax.get_xaxis_transform(),
+                    ha="center", va="bottom", fontsize=8, color=INK_MUTED)
+
+    ax.axvline(0, color=INK_MUTED, linewidth=1, linestyle="--", zorder=2)
+
+    if band:
+        lo_col, hi_col = band
+        ax.fill_between(d["rel_day"], d[lo_col], d[hi_col], color=SERIES,
+                        alpha=0.18, linewidth=0, zorder=2)
+    ax.plot(d["rel_day"], d[value_col], color=SERIES, linewidth=2, zorder=3)
+
+    ax.set_title(title, fontsize=13, fontweight="600", color=INK, loc="left", pad=18)
+    ax.set_xlabel("days relative to index surgery", fontsize=10, color=INK_MUTED)
+    ax.set_ylabel(ylabel or value_col, fontsize=10, color=INK_MUTED)
+    ax.set_xlim(d["rel_day"].min(), d["rel_day"].max())
+
+    full_note = note
+    if suppress and dropped:
+        full_note = (f"{dropped} day(s) below {SUPPRESS_THRESHOLD} patients omitted"
+                     + (f"  |  {note}" if note else ""))
+    if save_as:
+        cfg.save_figure(fig, save_as, suppress, full_note)
+    else:
+        fig.text(0.01, 0.005, full_note, fontsize=8, color=INK_MUTED)
+    return fig, dropped
+
+
+def plot_distribution(cfg, df, label_col, count_col="n_patients", title="",
+                      xlabel="", suppress=False, save_as=None, logy=False, note=""):
+    """Bar chart of patient counts per bucket, with the sparse tail aggregated.
+
+    When `suppress` is set the under-threshold buckets are summed into one visible
+    "other" bar rather than hidden, so the displayed total still reconciles and no
+    individual small cell is recoverable. Returns (fig, n_buckets_absorbed).
+    """
+    import matplotlib.pyplot as plt
+
+    d = df.reset_index(drop=True)
+    absorbed = 0
+    if suppress:
+        d, absorbed, absorbed_count = collapse_small_cells(d, count_col, label_col)
+        d = d.reset_index(drop=True)
+
+    labels = [str(v) for v in d[label_col]]
+    heights = [int(v) for v in d[count_col]]
+
+    if not labels:
+        # Every bucket fell under the threshold and was dropped. Drawing an empty axis
+        # would read as "no patients" rather than "nothing may be shown", so say so.
+        raise ValueError(
+            f"Nothing left to plot: every bucket is below the {SUPPRESS_THRESHOLD}-"
+            "participant threshold. Widen the buckets before plotting a suppressed figure."
+        )
+    longest_label = max(len(label) for label in labels)
+
+    fig, ax = _new_figure(height=max(4.6, 0.32 * len(labels) + 2.4)
+                          if len(labels) > 14 else 4.6)
+    xs = range(len(labels))
+    bars = ax.bar(xs, heights, width=0.78, color=SERIES, linewidth=0, zorder=3)
+    if logy:
+        ax.set_yscale("log")
+
+    ax.set_title(title, fontsize=13, fontweight="600", color=INK, loc="left", pad=10)
+    ax.set_xlabel(xlabel or label_col, fontsize=10, color=INK_MUTED)
+    ax.set_ylabel("patients", fontsize=10, color=INK_MUTED)
+    ax.set_xticks(list(xs))
+    ax.set_xticklabels(labels, rotation=45 if longest_label > 6 else 0,
+                       ha="right" if longest_label > 6 else "center")
+    for rect, height in zip(bars, heights):
+        ax.text(rect.get_x() + rect.get_width() / 2, rect.get_height(), f"{height:,}",
+                ha="center", va="bottom", fontsize=8.5, color=INK_MUTED)
+
+    full_note = note
+    if suppress and absorbed:
+        full_note = (f"{absorbed} bucket(s) aggregated into 'other'"
+                     + (f"  |  {note}" if note else ""))
+    if save_as:
+        cfg.save_figure(fig, save_as, suppress, full_note)
+    else:
+        fig.text(0.01, 0.005, full_note, fontsize=8, color=INK_MUTED)
+    return fig, absorbed
