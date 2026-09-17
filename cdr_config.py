@@ -15,7 +15,7 @@ Run srp_common.list_cdr_datasets() to see what is available in the workspace pro
 """
 
 # The curated data repository: "<project>.<dataset>".
-# Taken from the Workbench cohort-builder SQL for cohort CardiacSurgxFitbit
+# Taken from the Workbench cohort-builder SQL for the surgery x Fitbit cohort
 # (dataset AllOfUsControlledTierDatasetv9, built 2026-09-09).
 PINNED_CDR = "wb-silky-artichoke-2408.C2025Q4R6"
 
