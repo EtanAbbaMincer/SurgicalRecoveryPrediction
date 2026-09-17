@@ -45,6 +45,7 @@ __all__ = [
     # cohort SQL
     "SURGERY_ANCESTOR_CONCEPT_ID",
     "SURGERY_ANCESTOR_SNOMED_CODE",
+    "FITBIT_PRESENCE_TABLE",
     "INDEX_RULES",
     "DEFAULT_WINDOWS",
     "cohort_ctes",
@@ -499,6 +500,12 @@ def init(notebook: str, verbose: bool = True, reader: Callable | None = None,
 SURGERY_ANCESTOR_CONCEPT_ID = 4301351
 SURGERY_ANCESTOR_SNOMED_CODE = "387713003"
 
+# "Has Fitbit data" is taken as having at least one row in this table. All of Us
+# publishes a has_fitbit flag in its cohort-builder helper tables, but reading that
+# would put the cohort definition back outside version control; presence in a Fitbit
+# table is the same statement, derived from the CDR and auditable here.
+FITBIT_PRESENCE_TABLE = "activity_summary"
+
 # How to collapse a patient's several surgery-days into one index date. Which rule is
 # correct is still open -- that is what index_surgery/surgery_day_distribution.ipynb is
 # for -- so it is a parameter, not a constant, and every notebook records the rule it
@@ -528,15 +535,25 @@ def cohort_ctes(cfg: "Session", index_rule: str = "first",
                 extra: str = "") -> str:
     """Return a 'WITH ...' prefix defining the cohort and one index date per patient.
 
-    Defines four CTEs, each usable by the query that follows:
+    Reads ONLY the CDR. Defines five CTEs, each usable by the query that follows:
 
-        surgical_concept  concept_id      -- the ancestor plus every descendant
-        cohort            person_id       -- EHR + Fitbit + >=1 qualifying procedure
+        surgical_concept  concept_id      -- the ancestor and every descendant
+        fitbit_person     person_id       -- anyone with wearable data
+        cohort            person_id       -- Fitbit + >=1 qualifying procedure
         surgical_events   person_id, surgery_date
         index_surgery     person_id, index_date, n_surgery_days
 
-    Membership is read from the cohort-builder index tables rather than re-derived,
-    so a notebook cannot drift from the cohort that was actually built. `extra` is
+    The cohort is derived here rather than read from the Workbench cohort-builder
+    index tables, so the definition lives in version-controlled code and cannot be
+    silently narrowed by UI state -- which is what the repo's conventions require of
+    a cohort definition, and what makes the concept set auditable by counting
+    surgical_concept.
+
+    A separate has_ehr_data test is not needed: procedure_occurrence rows ARE EHR
+    data, so requiring a qualifying procedure already implies it.
+
+    concept_ancestor includes the self-row at zero levels of separation, so the
+    ancestor concept itself is in surgical_concept without a union. `extra` is
     appended as further comma-separated CTEs when a notebook needs its own.
 
     `index_rule` must be a key of INDEX_RULES; it is interpolated as an aggregate
@@ -552,22 +569,19 @@ def cohort_ctes(cfg: "Session", index_rule: str = "first",
 
     ctes = f"""
     surgical_concept AS (
-        SELECT descendant AS concept_id
-        FROM `{cfg.CDR_INDEX}`.T_HAD_procedureConcept_default
-        WHERE ancestor = {SURGERY_ANCESTOR_CONCEPT_ID}
-        UNION ALL
-        SELECT {SURGERY_ANCESTOR_CONCEPT_ID}
+        SELECT DISTINCT ca.descendant_concept_id AS concept_id
+        FROM `{cfg.CDR}`.concept_ancestor AS ca
+        WHERE ca.ancestor_concept_id = {SURGERY_ANCESTOR_CONCEPT_ID}
+    ),
+    fitbit_person AS (
+        SELECT DISTINCT person_id
+        FROM `{cfg.CDR}`.{FITBIT_PRESENCE_TABLE}
     ),
     cohort AS (
-        SELECT id AS person_id
-        FROM `{cfg.CDR_INDEX}`.T_ENT_person
-        WHERE has_ehr_data = true
-          AND has_fitbit = true
-          AND id IN (
-              SELECT person_id
-              FROM `{cfg.CDR_INDEX}`.T_ENT_procedureOccurrence
-              WHERE procedure_concept_id IN (SELECT concept_id FROM surgical_concept)
-          )
+        SELECT DISTINCT po.person_id
+        FROM `{cfg.CDR}`.procedure_occurrence AS po
+        JOIN fitbit_person AS f ON f.person_id = po.person_id
+        WHERE po.procedure_concept_id IN (SELECT concept_id FROM surgical_concept)
     ),
     surgical_events AS (
         SELECT
