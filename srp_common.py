@@ -17,7 +17,7 @@ Usage from a notebook inside a task directory:
 
     import srp_common
     cfg = srp_common.init("surgery_day_distribution")
-    CDR, CDR_INDEX = cfg.CDR, cfg.CDR_INDEX
+    CDR = cfg.CDR
     FIGURES, CACHE_DIR = cfg.FIGURES, cfg.CACHE_DIR
     cached_gbq = cfg.cached_gbq
 
@@ -38,7 +38,6 @@ from typing import Callable
 __all__ = [
     "CDR_ENV_CANDIDATES",
     "Session",
-    "discover_cohort_index",
     "init",
     "list_cdr_datasets",
     "resolve_cdr",
@@ -233,68 +232,12 @@ def list_cdr_datasets(project: str | None = None):
     return datasets
 
 
-def discover_cohort_index(cdr: str, verbose: bool = True) -> str:
-    """Return the newest cohort-builder index dataset for `cdr`.
-
-    The Workbench cohort builder writes a per-build dataset '<CDR>_index_<suffix>'
-    holding the T_ENT_* / T_HAD_* / T_ESA_* cohort tables. It has no environment
-    variable and changes when the COHORT is rebuilt -- a different trigger from a
-    CDR release -- so it is discovered rather than hard-coded, and a rebuild
-    therefore changes the cache key and forces a re-query.
-
-    Ordered by creation_time, which is chronologically correct regardless of how
-    the name suffix happens to be formatted.
-    """
-    import pandas_gbq
-
-    project, _, dataset = cdr.partition(".")
-    sql = f"""
-        SELECT schema_name, creation_time
-        FROM `{project}`.INFORMATION_SCHEMA.SCHEMATA
-        WHERE STARTS_WITH(schema_name, '{dataset}_index_')
-        ORDER BY creation_time DESC
-    """
-    try:
-        candidates = pandas_gbq.read_gbq(sql, dialect="standard", progress_bar_type=None)
-    except Exception as exc:
-        # Enumerating datasets needs 'bigquery.datasets.get' on the project that HOLDS
-        # the CDR. All of Us grants read on the curated tables without granting metadata
-        # access, so this is expected to fail in Verily Workbench -- and it is not worth
-        # a traceback the caller cannot act on.
-        raise RuntimeError(
-            f"Cannot discover the cohort index dataset in project '{project}': "
-            f"{type(exc).__name__}: {exc}\n\n"
-            "This is usually a permissions boundary, not a bug: the CDR project grants "
-            "read access to the curated tables but not 'bigquery.datasets.get', so its "
-            "INFORMATION_SCHEMA cannot be queried. Pin the dataset instead:\n\n"
-            f"    # cdr_config.py\n"
-            f"    PINNED_COHORT_INDEX = \"{project}.{dataset}_index_<build stamp>\"\n\n"
-            "The build stamp appears in the cohort-builder SQL that Workbench generates "
-            "(look for the '_index_' dataset). Update it when you rebuild the cohort."
-        ) from exc
-
-    if candidates.empty:
-        raise RuntimeError(
-            f"No cohort index dataset found starting with '{dataset}_index_' in "
-            f"project '{project}'. Build the cohort in the Workbench cohort builder, "
-            f"or set WORKSPACE_CDR_INDEX explicitly."
-        )
-
-    if verbose and len(candidates) > 1:
-        print(f"Cohort index: {len(candidates)} builds found, using the newest:")
-        for _, row in candidates.iterrows():
-            print(f"    {row['schema_name']:42s} created {row['creation_time']}")
-
-    return f"{project}.{candidates.iloc[0]['schema_name']}"
-
-
 @dataclass
 class Session:
     """Resolved dataset names and paths for one notebook, plus its cached reader."""
 
     notebook: str
     CDR: str
-    CDR_INDEX: str
     CDR_SOURCE: str
     FIGURES: Path
     CACHE_DIR: Path
@@ -309,13 +252,13 @@ class Session:
         return self.CDR.partition(".")[2]
 
     def cache_key(self, sql: str) -> str:
-        """Hash the query together with both dataset names.
+        """Hash the query together with the dataset it runs against.
 
-        Including CDR and CDR_INDEX is what makes a CDR release or a cohort
-        rebuild miss the cache instead of serving a stale extract.
+        Including the CDR is what makes a release bump miss the cache instead of
+        serving the previous release's extract under the new release's name.
         """
         return hashlib.sha256(
-            "|".join([sql, self.CDR, self.CDR_INDEX]).encode()
+            "|".join([sql, self.CDR]).encode()
         ).hexdigest()[:16]
 
     def cached_gbq(self, sql: str, name: str, force_refresh: bool = False):
@@ -417,53 +360,18 @@ def _default_reader(sql: str):
         )
 
 
-def _assert_index_matches_cdr(cdr: str, cdr_index: str) -> None:
-    """Fail if the cohort index dataset does not belong to the CDR being queried.
-
-    Both are pinned by hand, so they can drift apart: bump PINNED_CDR to a new release
-    and forget PINNED_COHORT_INDEX, and the queries join the NEW curated tables to the
-    OLD cohort's index tables. That usually executes without error and yields the
-    previous release's cohort -- silently wrong, which is the worst outcome. The index
-    dataset is named '<CDR dataset>_index_<build stamp>', so the mismatch is detectable
-    without any metadata permission.
-    """
-    cdr_dataset = cdr.partition(".")[2]
-    index_dataset = cdr_index.partition(".")[2]
-    if index_dataset.startswith(f"{cdr_dataset}_index_"):
-        return
-    raise RuntimeError(
-        f"Cohort index does not match the CDR.\n"
-        f"    CDR        : {cdr}\n"
-        f"    cohort index: {cdr_index}\n\n"
-        f"The index dataset should be named '{cdr_dataset}_index_<build stamp>'. This "
-        "almost always means the CDR was bumped without rebuilding the cohort against "
-        "it. Rebuild the cohort in the Workbench cohort builder, then set the new "
-        "'_index_' dataset as PINNED_COHORT_INDEX in cdr_config.py.\n\n"
-        "If the mismatch is deliberate, pass strict_index=False."
-    )
-
-
 def init(notebook: str, verbose: bool = True, reader: Callable | None = None,
-         cdr: str | None = None, cdr_index: str | None = None,
-         strict_index: bool = True) -> Session:
-    """Resolve datasets, create the notebook's git-ignored output dirs, and report.
+         cdr: str | None = None) -> Session:
+    """Resolve the CDR, create the notebook's git-ignored output dirs, and report.
 
     `notebook` is the notebook's filename stem; its figure folder is named
     '<notebook>_figures/' per the repo layout convention. `reader` overrides the
-    BigQuery reader, for tests. `cdr` / `cdr_index` override resolution and
-    discovery respectively. `strict_index` checks that the cohort index dataset
-    belongs to the resolved CDR; leave it on unless the mismatch is deliberate.
+    BigQuery reader, for tests. `cdr` overrides resolution.
+
+    The CDR is the only dataset a notebook needs: cohorts are derived from it by
+    cohort_ctes rather than read from a Workbench cohort-builder index.
     """
     cdr_source, cdr = resolve_cdr(cdr)
-    cdr_index = (
-        cdr_index
-        or os.environ.get("WORKSPACE_CDR_INDEX")
-        or _pinned("PINNED_COHORT_INDEX")
-        or discover_cohort_index(cdr, verbose=verbose)
-    )
-
-    if strict_index:
-        _assert_index_matches_cdr(cdr, cdr_index)
 
     figures = Path(f"{notebook}_figures")
     cache_dir = Path("_cache")
@@ -471,13 +379,12 @@ def init(notebook: str, verbose: bool = True, reader: Callable | None = None,
     cache_dir.mkdir(exist_ok=True)
 
     session = Session(
-        notebook=notebook, CDR=cdr, CDR_INDEX=cdr_index, CDR_SOURCE=cdr_source,
+        notebook=notebook, CDR=cdr, CDR_SOURCE=cdr_source,
         FIGURES=figures, CACHE_DIR=cache_dir, _reader=reader,
     )
 
     if verbose:
         print(f"CDR         : {cdr}   (from {cdr_source})")
-        print(f"Cohort index: {cdr_index}")
         print(f"Figures     : {figures}/")
         print(f"Cache       : {cache_dir}/")
 
@@ -804,16 +711,15 @@ def write_scorecard(cfg: "Session", **fields):
     """Write this notebook's one-row audit summary into the task cache.
 
     Keyed by notebook stem, so re-running a notebook replaces its own row and cannot
-    duplicate it. The CDR, cohort index and index rule are stamped in automatically,
-    because a scorecard compared across different values of those would be comparing
-    different analyses.
+    duplicate it. The CDR and the index rule are stamped in automatically, because a
+    scorecard compared across different values of those would be comparing different
+    analyses.
     """
     import pandas
 
     row = {
         "metric": cfg.notebook,
         "CDR": cfg.CDR,
-        "CDR_INDEX": cfg.CDR_INDEX,
         **fields,
     }
     path = cfg.CACHE_DIR / f"{SCORECARD_PREFIX}{cfg.notebook}.parquet"
@@ -840,7 +746,7 @@ def read_scorecards(cfg: "Session"):
         )
     frame = pandas.concat([pandas.read_parquet(p) for p in paths], ignore_index=True)
 
-    for column in ("CDR", "CDR_INDEX"):
+    for column in ("CDR",):
         distinct = sorted(frame[column].dropna().unique())
         if len(distinct) > 1:
             raise RuntimeError(

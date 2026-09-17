@@ -121,13 +121,16 @@ Until `core.hooksPath` is set, **Layer 2 is inactive.** Verify with
   stale data.
 - Build phenotypes from **OMOP standard concept IDs / concept sets**, not raw code strings, so
   they survive vocabulary updates.
-- **Cohort-builder index datasets are a separate, un-versioned reference.** Workbench cohort
-  builder emits SQL against two datasets: the CDR (resolvable from the environment) and a
-  per-build index dataset suffixed with a build date, e.g. `<CDR>_index_061026`, holding the
-  `T_ENT_*` / `T_HAD_*` / `T_ESA_*` cohort tables. That suffix has no standard environment
-  variable and changes when the **cohort is rebuilt** — a different trigger from a CDR release.
-  Keep it in one named constant per notebook (`COHORT_INDEX_SUFFIX`), never inline in the SQL,
-  and include both dataset names in any cache key so a rebuild invalidates cached extracts.
+- **Do not select through cohort-builder index datasets.** Workbench cohort builder emits SQL
+  against two datasets: the CDR, and a per-build index dataset suffixed with a build date
+  (`<CDR>_index_061026`), holding the `T_ENT_*` / `T_HAD_*` / `T_ESA_*` cohort tables. Selecting
+  through those puts the cohort definition in UI state rather than in code — its breadth becomes
+  unverifiable, a rebuild changes results silently, and the dataset must be hand-pinned because
+  listing it needs `bigquery.datasets.get`, which All of Us does not grant on the CDR's project.
+  **Derive the cohort from the CDR instead**, via `srp_common.cohort_ctes()`: `concept_ancestor`
+  for the concept set, presence in a Fitbit table for wearable data, `procedure_occurrence` for
+  the qualifying event. Adapt generated cohort-builder SQL by replacing its index-table
+  subqueries with the `cohort` CTE — do not keep them.
 - **Generated cohort-builder code ends each query with `.head(5)`.** That is a participant-level
   record listing. Replace it with an aggregate summary; inspecting rows interactively is fine,
   but a listing must never reach saved output.

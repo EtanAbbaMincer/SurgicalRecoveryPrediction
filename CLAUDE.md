@@ -50,10 +50,10 @@ compliance/
   _cache/                 <- git-ignored
 ```
 
-Shared code lives in **`srp_common.py` at the repo root** -- CDR resolution, cohort-index
-discovery, and the Parquet-cached BigQuery reader -- imported by each notebook rather than
-copy-pasted. Notebooks find it by walking up from `cwd`, so they run from either the task
-directory or the root:
+Shared code lives in **`srp_common.py` at the repo root** -- CDR resolution, the cohort
+definition, the Parquet-cached BigQuery reader, small-cell suppression and the shared
+plotters -- imported by each notebook rather than copy-pasted. Notebooks find it by walking
+up from `cwd`, so they run from either the task directory or the root.
 
 **Verily Workbench does not publish the CDR through the environment** -- there is no
 `WORKSPACE_CDR` and no `GOOGLE_CLOUD_PROJECT`. So the dataset is **pinned in
@@ -62,31 +62,40 @@ auto-selecting the newest CDR would shift results underneath a finished analysis
 All of Us publishes a release. Bump it as an explicit commit and re-run affected
 notebooks -- cache keys include the CDR, so they miss.
 
-**The cohort index dataset is pinned too.** Discovery would need
-`bigquery.datasets.get` on the CDR's project, and All of Us grants read on the curated
-tables without granting metadata access -- `INFORMATION_SCHEMA.SCHEMATA` returns 403
-there. So `PINNED_COHORT_INDEX` is set explicitly and **must be updated when you rebuild
-the cohort** (trigger: a rebuild, not a CDR release).
+**The CDR is the only dataset a notebook needs.** The cohort is derived from it by
+`srp_common.cohort_ctes()`, which builds the concept set from `concept_ancestor`, takes
+"has Fitbit" as presence in `activity_summary`, and requires at least one qualifying
+`procedure_occurrence` row. There is no separate EHR test because procedure rows *are*
+EHR data.
 
-Because both are hand-pinned they can drift, so `init` checks that the index dataset is
-named `<CDR dataset>_index_<build stamp>` and raises if not -- that catches bumping the
-CDR without rebuilding the cohort, which would otherwise run fine and quietly return the
-previous release's cohort. Pass `strict_index=False` if a mismatch is deliberate.
+This is deliberate and worth not undoing. The Workbench cohort builder emits a per-build
+index dataset (`<CDR dataset>_index_<build stamp>`, holding `T_ENT_*` / `T_HAD_*` /
+`T_ESA_*`), and the notebooks used to select through it. That put the cohort definition in
+UI state rather than in code: its breadth was unverifiable, a rebuild changed results
+silently, and the dataset had to be hand-pinned because listing it needs
+`bigquery.datasets.get`, which All of Us does not grant on the CDR's project. Deriving the
+cohort from the CDR removes all of that. **Do not reintroduce a dependency on the index
+tables** -- if a cohort needs changing, change `cohort_ctes`.
 
 Resolution order is explicit argument -> environment variable -> `cdr_config.PINNED_CDR`.
 One-off override without a commit:
 
 ```python
 cfg = srp_common.init("<stem>", cdr="<project>.<dataset>")
-cfg = srp_common.init("<stem>", cdr_index="<project>.<dataset>")  # skip index discovery
 ```
 
 ```python
 cfg = srp_common.init("<notebook stem>")
-CDR, CDR_INDEX = cfg.CDR, cfg.CDR_INDEX
+CDR = cfg.CDR
 FIGURES, CACHE_DIR = cfg.FIGURES, cfg.CACHE_DIR
 cached_gbq = cfg.cached_gbq
+
+CTES = cfg.cohort_ctes(index_rule="first")   # cohort + one index date per patient
 ```
+
+The **index rule** -- which of a patient's surgery-days becomes the index date -- is a
+parameter, not a constant, because `index_surgery/surgery_day_distribution.ipynb` has not
+settled it. `"first"` until it does.
 
 Invoke `pipeline-manager` before creating a directory or notebook, or when deciding where a new
 file belongs.
