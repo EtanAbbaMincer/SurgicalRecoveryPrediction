@@ -115,7 +115,7 @@ def main():
     print("""
 Notebook outputs embed rendered tables and figures, which is data. A committed
 notebook must carry code and markdown only; figures belong in the git-ignored
-<notebook>_figures/ folder.
+figures/<notebook>/ folder.
 
 To fix:
 

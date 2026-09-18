@@ -371,18 +371,24 @@ def init(notebook: str, verbose: bool = True, reader: Callable | None = None,
          cdr: str | None = None) -> Session:
     """Resolve the CDR, create the notebook's git-ignored output dirs, and report.
 
-    `notebook` is the notebook's filename stem; its figure folder is named
-    '<notebook>_figures/' per the repo layout convention. `reader` overrides the
-    BigQuery reader, for tests. `cdr` overrides resolution.
+    `notebook` is the notebook's filename stem; its figures go in 'figures/<notebook>/',
+    one 'figures/' per task directory holding a subfolder per notebook, the same way one
+    '_cache/' per task holds the query cache. `reader` overrides the BigQuery reader, for
+    tests. `cdr` overrides resolution.
+
+    The path is built here rather than in each notebook so that moving it again is a
+    one-line change. It replaces the sibling '<notebook>_figures/' folder this repo used
+    until 2026-09-18; the old folders are regenerable git-ignored output, so a stale one
+    left on disk costs nothing and can simply be deleted.
 
     The CDR is the only dataset a notebook needs: cohorts are derived from it by
     cohort_ctes rather than read from a Workbench cohort-builder index.
     """
     cdr_source, cdr = resolve_cdr(cdr)
 
-    figures = Path(f"{notebook}_figures")
+    figures = Path("figures") / notebook
     cache_dir = Path("_cache")
-    figures.mkdir(exist_ok=True)
+    figures.mkdir(parents=True, exist_ok=True)
     cache_dir.mkdir(exist_ok=True)
 
     session = Session(
