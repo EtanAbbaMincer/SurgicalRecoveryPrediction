@@ -65,10 +65,9 @@ __all__ = [
     "collapse_small_cells",
     "min_cell",
     "style_axes",
-    # index hospitalisation and probes
+    # index hospitalisation
     "INPATIENT_VISIT_CONCEPT_IDS",
     "index_visit_cte",
-    "columns_sql",
     # scorecard hand-off
     "write_scorecard",
     "read_scorecards",
@@ -786,24 +785,6 @@ def index_visit_cte(cfg: "Session") -> str:
         WHERE vo.visit_concept_id IN ({ids})
           AND vo.visit_end_date IS NOT NULL
     )"""
-
-
-def columns_sql(cfg: "Session", tables: "list[str]") -> str:
-    """Query listing the columns of `tables` in the CDR, for an availability probe.
-
-    Table and column names are the one thing a notebook cannot infer, and a wrong
-    guess fails with an opaque BigQuery error hundreds of lines into a run. Probing
-    INFORMATION_SCHEMA first turns that into a readable list. Needs only dataset-level
-    metadata access, which read access to the curated tables normally carries -- unlike
-    the project-level access that cohort-index discovery would need.
-    """
-    quoted = ", ".join(f"'{t}'" for t in tables)
-    return f"""
-        SELECT table_name, column_name, data_type
-        FROM `{cfg.CDR}`.INFORMATION_SCHEMA.COLUMNS
-        WHERE table_name IN ({quoted})
-        ORDER BY table_name, ordinal_position
-    """
 
 
 # ===========================================================================
