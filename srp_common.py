@@ -888,14 +888,17 @@ def _new_figure(height=4.6):
 
 def plot_rel_day_curve(cfg, df, value_col, count_col="n_patients", band=None,
                        title="", ylabel="", suppress=False, save_as=None,
-                       show_windows=True, note=""):
+                       show_windows=True, note="", zero_line=False):
     """Plot `value_col` against day relative to the index surgery.
 
     `band` is an optional (low_col, high_col) pair drawn as a shaded interquartile
-    ribbon behind the line. Suppression drops any day whose `count_col` is under the
-    threshold rather than aggregating it, which is correct here because no total is
-    published alongside -- there is nothing for a reader to recover the dropped days
-    by subtraction from.
+    ribbon behind the line. `zero_line` draws a horizontal rule at y=0, which a curve
+    of differences needs to be readable at all -- without it there is no way to see
+    which side of no-change the line is on.
+
+    Suppression drops any day whose `count_col` is under the threshold rather than
+    aggregating it, which is correct here because no total is published alongside --
+    there is nothing for a reader to recover the dropped days by subtraction from.
 
     Returns (fig, n_days_dropped) so the notebook can report how much of the curve
     the suppressed version is missing.
@@ -919,6 +922,8 @@ def plot_rel_day_curve(cfg, df, value_col, count_col="n_patients", band=None,
                     ha="center", va="bottom", fontsize=8, color=INK_MUTED)
 
     ax.axvline(0, color=INK_MUTED, linewidth=1, linestyle="--", zorder=2)
+    if zero_line:
+        ax.axhline(0, color=INK_MUTED, linewidth=1, linestyle=":", zorder=2)
 
     if band:
         lo_col, hi_col = band
