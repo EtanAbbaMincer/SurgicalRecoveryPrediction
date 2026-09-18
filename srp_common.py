@@ -430,26 +430,28 @@ INDEX_RULES = {
     "last": "MAX",
 }
 
-# Windows in days relative to the index date, half-open on neither end: both bounds are
-# inclusive. Shared so that "coverage in the baseline window" means the same thing in
-# every outcome notebook and the metrics stay comparable.
+# Windows in days relative to the index date, both bounds inclusive. Shared so that
+# "coverage in the baseline window" means the same thing in every outcome notebook and the
+# metrics stay comparable.
 #
-# The pre-operative baseline runs right up to the day before surgery. An earlier version
-# stopped at day -8 and gave the final week its own "periop" window, on the argument that
-# activity in that week is already depressed by the condition being operated on. That is
-# true, but it is not a reason to discard the days: the week before surgery is part of the
-# patient's pre-operative state, it is the densest wearable coverage in the pre-operative
-# period, and excluding it shrinks the span a patient has to reach the >=7-day coverage
-# threshold in from 30 days to 23. The consequence to keep in mind when reading results is
-# that a baseline computed this way is a mixed pre-operative level, not a healthy-state
-# level: it understates the true drop from health, and a "return to baseline" is a return
-# to that mixed level.
+# Deliberately only two windows: the 30 days before surgery and the 30 days after. An
+# earlier version split the post-operative side into acute / early / recovery / late and
+# held the last pre-operative week out as its own "periop" bucket. That granularity is
+# what a settled metric needs; the question these notebooks actually answer is the coarser
+# one of which candidate metrics have usable data at all, and the finer buckets made every
+# notebook carry window bookkeeping that decided nothing. Re-split the post-operative side
+# when a metric is being constructed rather than screened.
+#
+# Day 0, the day of surgery, is in neither window: it is the operative day rather than a
+# pre- or post-operative one, so a record on it counts toward neither side.
+#
+# The baseline runs right up to the day before surgery, which makes it a mixed
+# pre-operative level rather than a healthy-state one -- activity in the final week is
+# already depressed by the condition being operated on. It therefore understates the drop
+# from health, and "return to baseline" means return to that mixed level.
 DEFAULT_WINDOWS = {
     "baseline": (-30, -1),
-    "acute": (0, 13),
-    "early": (14, 29),
-    "recovery": (30, 89),
-    "late": (90, 179),
+    "postop": (1, 30),
 }
 
 
