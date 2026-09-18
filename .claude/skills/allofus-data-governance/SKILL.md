@@ -36,7 +36,7 @@ Notebooks are on the allowed list, but **saved cell outputs embed rendered table
 which is data.** "Notebooks allowed" and "no data at all" are only consistent if a committed
 notebook carries code and markdown with **outputs cleared**.
 
-- Figures live in the git-ignored `<stem>_figures/` folder, so stripping loses nothing durable.
+- Figures live in the git-ignored `figures/<stem>/` folder, so stripping loses nothing durable.
 - A staged `.ipynb` whose diff shows populated `"outputs": [...]` is a **violation** — stop and
   clear it.
 ### Enforcement — INSTALLED, two independent layers
@@ -140,7 +140,7 @@ Until `core.hooksPath` is set, **Layer 2 is inactive.** Verify with
 ## Relationship to `pipeline-manager`
 
 `pipeline-manager` (user-global) owns **portable layout**: task-scoped directories at the repo
-root, one notebook per variable, no filename prefixes, `<stem>_figures/` folders, `<task>/_cache/`,
+root, one notebook per variable, no filename prefixes, `figures/<stem>/` folders, `<task>/_cache/`,
 and the caching strategy. It is deliberately domain-neutral.
 
 This skill owns everything **specific to All of Us / Verily Workbench**. Where the two conflict,

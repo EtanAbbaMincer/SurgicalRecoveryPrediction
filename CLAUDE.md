@@ -32,7 +32,7 @@ Two skills govern this repo. Consult them rather than relying on this summary:
 | Skill | Scope | Owns |
 |---|---|---|
 | `allofus-data-governance` (`.claude/skills/`, project-local) | All of Us / Verily specifics | DUA commit rules, `.gitignore`, output stripping, small-cell suppression, OMOP/BigQuery access |
-| `pipeline-manager` (`~/.claude/skills/`, user-global) | Portable layout conventions | Task-scoped directories, per-variable notebooks, `*_figures/`, `_cache/`, caching strategy |
+| `pipeline-manager` (`~/.claude/skills/`, user-global) | Portable layout conventions | Task-scoped directories, per-variable notebooks, `figures/<stem>/`, `_cache/`, caching strategy, notebook-internal format |
 
 Where they conflict, **`allofus-data-governance` wins** — it carries the compliance rules;
 `pipeline-manager` is deliberately domain-neutral and loads for unrelated projects too.
@@ -44,9 +44,10 @@ Task-scoped directories at the repo root, one notebook per variable, no filename
 ```
 compliance/
   bmi.ipynb
-  bmi_figures/            <- *_suppressed.png committable; other figures git-ignored
   blood_pressure.ipynb
-  blood_pressure_figures/
+  figures/                <- one per task, a subfolder per notebook; git-ignored
+    bmi/                  <- *_suppressed.png committable; other figures git-ignored
+    blood_pressure/
   _cache/                 <- git-ignored
 ```
 
@@ -54,7 +55,7 @@ compliance/
 approach that has been decided against moves there keeping its filename; its figures and
 cache entries are regenerable and git-ignored, so they are dropped. Deleting would lose
 the record that the approach was tried and why it failed, which is what stops it being
-proposed again. `not_using/` is not a task directory, so the notebooks / `*_figures/` /
+proposed again. `not_using/` is not a task directory, so the notebooks / `figures/` /
 `_cache/` rule does not apply to it.
 
 **Retiring is not finished until the references are gone.** Other notebooks may compute or
@@ -72,6 +73,21 @@ Shared code lives in **`srp_common.py` at the repo root** -- CDR resolution, the
 definition, the Parquet-cached BigQuery reader, small-cell suppression and the shared
 plotters -- imported by each notebook rather than copy-pasted. Notebooks find it by walking
 up from `cwd`, so they run from either the task directory or the root.
+
+**`baselines.py`, also at the repo root, holds the four individual wearable baselines** --
+a frozen pre-operative lookback, a trailing flat window, a trailing exponential window, and a
+short window read against a long one -- plus the parameters each was settled at. A baseline
+here is one patient's own normal, which is what a cross-sectional curve lacks:
+`outcomes/fitbit_sleep.ipynb` showed that part of the peri-operative sleep dip was who was
+wearing the device rather than how anyone slept. Every function takes a **person-day grid**
+(one row per `rel_day`, one column per patient) and `daily_summary` is the only way back out
+of one, so participant-level values never reach a print or a figure.
+
+**Its constants are inherited, not settled here.** They were swept against a cancer-diagnosis
+index in another project, so the shapes carry over and the numbers are a starting point;
+`individual_baselines/sleep_efficiency.ipynb` applies all four to sleep efficiency and compares
+what each costs, but nothing in this repo has re-swept them. Treat a change to one as a change
+to a result, the same way a `PINNED_CDR` bump is.
 
 **Verily Workbench does not publish the CDR through the environment** -- there is no
 `WORKSPACE_CDR` and no `GOOGLE_CLOUD_PROJECT`. So the dataset is **pinned in
