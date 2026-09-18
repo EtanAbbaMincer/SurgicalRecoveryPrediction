@@ -432,12 +432,20 @@ INDEX_RULES = {
 
 # Windows in days relative to the index date, half-open on neither end: both bounds are
 # inclusive. Shared so that "coverage in the baseline window" means the same thing in
-# every outcome notebook and the metrics stay comparable. The pre-operative baseline
-# stops at day -8 deliberately, to exclude the week before surgery, when activity is
-# already depressed by the condition being operated on.
+# every outcome notebook and the metrics stay comparable.
+#
+# The pre-operative baseline runs right up to the day before surgery. An earlier version
+# stopped at day -8 and gave the final week its own "periop" window, on the argument that
+# activity in that week is already depressed by the condition being operated on. That is
+# true, but it is not a reason to discard the days: the week before surgery is part of the
+# patient's pre-operative state, it is the densest wearable coverage in the pre-operative
+# period, and excluding it shrinks the span a patient has to reach the >=7-day coverage
+# threshold in from 30 days to 23. The consequence to keep in mind when reading results is
+# that a baseline computed this way is a mixed pre-operative level, not a healthy-state
+# level: it understates the true drop from health, and a "return to baseline" is a return
+# to that mixed level.
 DEFAULT_WINDOWS = {
-    "baseline": (-30, -8),
-    "periop": (-7, -1),
+    "baseline": (-30, -1),
     "acute": (0, 13),
     "early": (14, 29),
     "recovery": (30, 89),
