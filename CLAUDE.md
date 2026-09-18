@@ -50,6 +50,24 @@ compliance/
   _cache/                 <- git-ignored
 ```
 
+**Retired work goes to `not_using/` at the repo root, never deleted.** A notebook for an
+approach that has been decided against moves there keeping its filename; its figures and
+cache entries are regenerable and git-ignored, so they are dropped. Deleting would lose
+the record that the approach was tried and why it failed, which is what stops it being
+proposed again. `not_using/` is not a task directory, so the notebooks / `*_figures/` /
+`_cache/` rule does not apply to it.
+
+**Retiring is not finished until the references are gone.** Other notebooks may compute or
+compare against the retired metric -- `metric_comparison.ipynb` built DAOH itself rather
+than reading it from a scorecard, so retiring that metric meant editing three of its cells.
+
+Currently in `not_using/`:
+
+| Notebook | Why |
+|---|---|
+| `days_alive_out_of_hospital.ipynb` | Composite needs death records the CDR does not usefully carry, which would silently score deaths as perfect recoveries |
+| `discharge_disposition.ipynb` | A discharge destination is recorded for roughly 5% of the cohort |
+
 Shared code lives in **`srp_common.py` at the repo root** -- CDR resolution, the cohort
 definition, the Parquet-cached BigQuery reader, small-cell suppression and the shared
 plotters -- imported by each notebook rather than copy-pasted. Notebooks find it by walking
