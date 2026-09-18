@@ -49,6 +49,9 @@ __all__ = [
     "DEFAULT_WINDOWS",
     "cohort_ctes",
     "window_case_sql",
+    "require_columns",
+    "column_type",
+    "COHORT_TABLES",
     # figures and suppression
     "SUPPRESS_THRESHOLD",
     "SURFACE",
@@ -287,6 +290,10 @@ class Session:
         """Cohort + index-surgery CTE prefix for this session's datasets."""
         return cohort_ctes(self, index_rule=index_rule, extra=extra)
 
+    def require_columns(self, requirements: dict) -> None:
+        """Assert the pinned schema has `{table: [columns]}`, against this CDR."""
+        require_columns(requirements, cdr=self.CDR)
+
     def dry_run_bytes(self, sql: str) -> int:
         """Bytes BigQuery would scan for `sql`, without running or billing it.
 
@@ -474,6 +481,10 @@ def cohort_ctes(cfg: "Session", index_rule: str = "first",
             f"index_rule={index_rule!r} is not one of {sorted(INDEX_RULES)}."
         ) from None
 
+    require_columns(
+        {**COHORT_TABLES, FITBIT_PRESENCE_TABLE: ["person_id"]}, cdr=cfg.CDR
+    )
+
     ctes = f"""
     surgical_concept AS (
         SELECT DISTINCT ca.descendant_concept_id AS concept_id
@@ -620,6 +631,96 @@ def style_axes(*axes, grid_axis: str = "y") -> None:
             ax.spines[side].set_color(GRID)
         ax.tick_params(colors=INK_MUTED, labelsize=9)
 
+
+
+# ===========================================================================
+# Schema validation against the pinned CDR
+#
+# A wrong table or column name is the cheapest bug to prevent and one of the more
+# expensive to hit: BigQuery rejects it only after the query is composed, hundreds of
+# lines into a run, with a message that names a line number in generated SQL. The CDR's
+# schema is pinned in cdr_schema.py, so the same mistake can be caught at init() for
+# free.
+# ===========================================================================
+
+
+def _schema():
+    """Return (SCHEMA, CDR) from cdr_schema.py, or (None, None) if absent.
+
+    Optional by design: a fresh clone without the generated file still runs, it just
+    does not get the check. Missing validation must never be a hard failure -- that
+    would make the safety net a liability.
+    """
+    try:
+        import cdr_schema
+    except ImportError:
+        return None, None
+    return getattr(cdr_schema, "SCHEMA", None), getattr(cdr_schema, "CDR", None)
+
+
+def require_columns(requirements: dict, cdr: str | None = None) -> None:
+    """Raise if the pinned schema lacks any of `{table: [columns]}`.
+
+    Reports every missing name at once rather than the first, because fixing them one
+    BigQuery round-trip at a time is the thing this exists to avoid. For a missing
+    column it suggests near-misses from the same table, which is usually enough to spot
+    a rename.
+
+    A schema generated against a different CDR than the one being queried is worse than
+    no schema, so that mismatch warns loudly and skips the check rather than validating
+    against the wrong release.
+    """
+    schema, schema_cdr = _schema()
+    if schema is None:
+        print("Note: cdr_schema.py not found, so column names are unvalidated. "
+              "Regenerate it to get this check.")
+        return
+    if cdr and schema_cdr and cdr != schema_cdr:
+        print(f"WARNING: cdr_schema.py was generated against {schema_cdr}, but this "
+              f"notebook queries {cdr}. Skipping validation -- regenerate the schema.")
+        return
+
+    problems = []
+    for table, columns in sorted(requirements.items()):
+        if table not in schema:
+            near = [t for t in schema if table.split("_")[0] in t][:6]
+            problems.append(f"  table not in the CDR: {table}"
+                            + (f"\n      similar tables: {', '.join(near)}" if near else ""))
+            continue
+        for column in columns:
+            if column not in schema[table]:
+                stem = column.split("_")[0]
+                near = [c for c in schema[table] if stem in c or c in column][:6]
+                problems.append(f"  column not in {table}: {column}"
+                                + (f"\n      similar columns: {', '.join(near)}" if near else ""))
+
+    if problems:
+        raise RuntimeError(
+            "Schema check failed against the pinned CDR "
+            f"({schema_cdr}):\n" + "\n".join(problems) +
+            "\n\nEither the name is wrong, or the CDR moved and cdr_schema.py is stale. "
+            "Regenerate cdr_schema.py before assuming the name is wrong."
+        )
+
+
+def column_type(table: str, column: str) -> str | None:
+    """Data type of `table.column` in the pinned schema, or None if unknown.
+
+    Useful where a type decides the SQL -- a STRING flag needs CAST before comparison,
+    a BOOL does not.
+    """
+    schema, _ = _schema()
+    if not schema:
+        return None
+    return (schema.get(table, {}).get(column) or (None,))[0]
+
+
+# Tables cohort_ctes itself reads. Validated on every call, so a notebook gets the
+# check without having to remember to ask for it.
+COHORT_TABLES = {
+    "concept_ancestor": ["ancestor_concept_id", "descendant_concept_id"],
+    "procedure_occurrence": ["person_id", "procedure_concept_id", "procedure_datetime"],
+}
 
 # ===========================================================================
 # The index hospitalisation

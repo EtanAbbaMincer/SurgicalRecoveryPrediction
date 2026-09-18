@@ -97,6 +97,27 @@ The **index rule** -- which of a patient's surgery-days becomes the index date -
 parameter, not a constant, because `index_surgery/surgery_day_distribution.ipynb` has not
 settled it. `"first"` until it does.
 
+**The CDR's column schema is pinned too**, in `cdr_schema.py` at the repo root -- 133
+tables, 1335 columns, generated from `INFORMATION_SCHEMA.COLUMNS`. Structure only, so it
+is committable: table names, column names and types, never row counts or values.
+
+`cohort_ctes` validates its own tables on every call, and each notebook declares what else
+it reads:
+
+```python
+cfg.require_columns({"sleep_daily_summary": ["person_id", "sleep_date", "is_main_sleep"]})
+```
+
+A wrong or renamed name then fails at `init()` with near-miss suggestions, instead of as a
+BigQuery 400 partway through a run. `srp_common.column_type(table, column)` answers the
+question that check cannot -- `sleep_daily_summary.is_main_sleep` is a **STRING**, not a
+BOOL, so it needs `LOWER(CAST(... AS STRING)) IN ('true', '1')`. Assume nothing about a
+type; look it up.
+
+**Regenerate `cdr_schema.py` whenever `PINNED_CDR` is bumped.** A schema generated against
+a different CDR is worse than none, so `require_columns` detects the mismatch, warns and
+skips rather than validating against the wrong release.
+
 Invoke `pipeline-manager` before creating a directory or notebook, or when deciding where a new
 file belongs.
 
