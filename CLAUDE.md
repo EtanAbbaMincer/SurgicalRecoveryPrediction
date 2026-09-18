@@ -27,6 +27,39 @@ variable-combination rules also apply.
 
 Never use `git commit --no-verify` here. Details in `allofus-data-governance`.
 
+### Refreshing a workspace: `git sync`
+
+The workbench checkout is a scratch copy, not a place work is authored, so the wanted
+behaviour on a refresh is "make this directory match `origin`, and drop everything else" —
+stale figures, orphaned notebooks from a renamed task, `__pycache__`. Plain `git pull` does
+neither: it refuses on a conflict and never removes an untracked file, so old output
+accumulates and gets mistaken for current output.
+
+**`_cache/` is the one thing that must survive.** It holds materialized BigQuery extracts
+that cost real query spend to rebuild, and it is git-ignored, so an unqualified clean
+deletes it.
+
+That is a third piece of **one-time setup**, this one per machine rather than per clone
+(`--global`):
+
+```
+git config --global alias.sync '!b=$(git rev-parse --abbrev-ref HEAD) && git fetch origin && git reset --hard "origin/$b" && git clean -fdx -e "_cache*" -e ".venv" -e ".env"'
+git config --global alias.sync-preview '!b=$(git rev-parse --abbrev-ref HEAD) && git fetch origin && echo "--- files that differ from origin/$b ---" && git diff --stat "HEAD..origin/$b" && echo "--- local files that would be DELETED ---" && git clean -fdxn -e "_cache*" -e ".venv" -e ".env"'
+```
+
+Then use `git sync` in place of `git pull` in the workbench, and `git sync-preview` first
+whenever it is not obvious what is about to be thrown away.
+
+The `-e` patterns are gitignore syntax and carry no slash, so `_cache*` matches at any depth
+and keeps working if the layout changes — the same reasoning as the `*_suppressed.*` rules.
+`.venv` and `.env` are excluded because deleting an environment or a credentials file on
+every refresh is never what was meant. Nested git repositories, including
+`.claude/worktrees/`, are skipped by `git clean` unless `-ff` is given; do not add it.
+
+**`git sync` discards uncommitted local work, by design.** Commit or push anything worth
+keeping before running it. That makes it wrong for a checkout where notebooks are actually
+being edited, which is why it is a separate command rather than a redefinition of `pull`.
+
 Two skills govern this repo. Consult them rather than relying on this summary:
 
 | Skill | Scope | Owns |
