@@ -23,6 +23,7 @@ SurgicalRecoveryPrediction/
 ├── CLAUDE.md                      # the working rules; defers to the two skills below
 ├── .claude/skills/                # allofus-data-governance — DUA, suppression, what may be committed
 ├── srp_common.py                  # every shared definition: cohort, cache, suppression, plotters
+├── baselines.py                   # the four individual wearable baselines and their parameters
 ├── cdr_config.py                  # the pinned CDR. Committed on purpose
 ├── cdr_schema.py                  # 133 tables, 1335 columns. Structure only, no values
 ├── cohort/
@@ -48,9 +49,9 @@ Every notebook queries BigQuery; none of them reads another notebook's cache exc
 |---|---|
 | `cohort/surgery_fitbit.ipynb` | the cohort's breadth and size, and the shape of the person and procedure extracts |
 | `index_surgery/surgery_day_distribution.ipynb` | how many patients have more than one surgery-day, and therefore whether the index rule matters. **Not yet settled** |
-| `outcomes/fitbit_steps.ipynb` | whether a steps-based outcome is definable: coverage, the paired count, and time to return |
-| `outcomes/fitbit_sleep.ipynb` | the same for sleep duration and efficiency, plus whether any peri-operative decline is just non-wear |
-| `outcomes/fitbit_heart_rate.ipynb` | coverage from the daily summary, then what deriving a resting value from minute-level data would cost |
+| `outcomes/fitbit_steps.ipynb` | whether a steps-based outcome is definable: coverage, the four baselines' cost, the within-patient departure around surgery, and the per-patient recovery ratio |
+| `outcomes/fitbit_sleep.ipynb` | the same for sleep duration and efficiency, both read against each patient's own normal |
+| `outcomes/fitbit_heart_rate.ipynb` | coverage from the daily summary, then what deriving a resting value from minute-level data costs, and the same four baselines over what it buys |
 | `outcomes/length_of_stay.ipynb` | whether the index surgery sits in an identifiable stay, and whether the lengths spread |
 | `outcomes/readmission.ipynb` | coverage, the censoring problem, and the event rate at 30 and 90 days |
 | `outcomes/survey_physical_health.ipynb` | whether any patient has a survey answer on **both** sides of their surgery |
@@ -93,10 +94,12 @@ release under the new release's name, and an edited query misses rather than ret
 answer.
 
 * A hit returns the parquet without an API call.
-* Every query aggregates **inside** BigQuery and returns counts, quantiles or correlations. No
-  query in this repo returns participant-level rows, so the cache holds aggregates only — but it
-  stays gitignored regardless, because that is a property of the queries and not a guarantee of the
-  directory.
+* Most queries aggregate **inside** BigQuery and return counts, quantiles or correlations. **The
+  three wearable notebooks are the exception**: each pulls one person-day extract, because a
+  per-patient baseline cannot be reconstructed from cohort medians. Those extracts are
+  participant-level, so their parquet is too. They never leave the workspace, nothing is printed or
+  plotted from them except through `srp_common.reportable_days`, and `_cache/` is gitignored — but
+  the gitignore was always the guarantee, not the shape of the queries.
 * `cfg.dry_run_bytes(sql)` prices a query before running it. `fitbit_heart_rate.ipynb` is the only
   notebook that uses it as a gate: `MINUTE_LEVEL_BUDGET_GIB = 200` refuses the minute-level
   derivation above that, so reaching for `heart_rate_intraday` has to be a decision rather than an
@@ -106,7 +109,8 @@ answer.
 
 | file | what it is the authority for |
 |---|---|
-| `srp_common.py` | CDR resolution, `cohort_ctes`, the parquet-cached reader, `DEFAULT_WINDOWS`, `SUPPRESS_THRESHOLD`, `collapse_small_cells`, `write_scorecard`/`read_scorecards`, and every plotter |
+| `srp_common.py` | CDR resolution, `cohort_ctes`, the parquet-cached reader, `DEFAULT_WINDOWS`, `SUPPRESS_THRESHOLD`, `collapse_small_cells`, `write_scorecard`/`read_scorecards`, every plotter, and the grid boundary — `reportable_days`, `plot_baseline_curves`, `plot_baseline_coverage` |
+| `baselines.py` | the four individual wearable baselines — static lookback, rolling window, exponential window, comparative short-vs-long — their inherited parameters, and the person-day grid every one of them takes. No paths, no globals, no I/O |
 | `cdr_config.py` | `PINNED_CDR`. Resolution order is explicit argument → environment variable → this |
 | `cdr_schema.py` | the CDR's column schema, generated from `INFORMATION_SCHEMA.COLUMNS`. **Regenerate it whenever `PINNED_CDR` is bumped** — a schema from a different release is worse than none, so `require_columns` detects the mismatch and skips rather than validating against the wrong one |
 
@@ -133,13 +137,22 @@ with administrative artefacts rather than clinical ones.
 
 **Two metrics are retired**, in `not_using/`, and the reasons are the point — see *Not maintained*.
 
-**A cross-sectional curve is not a within-patient one.** Every per-day median over a wearable
-metric is taken over whoever recorded a value that day, and that set shrinks toward surgery. A
-decline is therefore consistent with patients doing worse **or** with the patients who score
-highest being the ones who stop wearing the device. `fitbit_sleep.ipynb` Part 3 is the worked
-pattern for separating the two: a fixed panel anchored on a band that does not overlap the run-up,
-each night differenced against that patient's own reference. Any new wearable metric needs the same
-treatment before its curve is believed.
+**A cross-sectional curve is not a within-patient one, and this repo no longer reports one as a
+result.** Every per-day median over a wearable metric is taken over whoever recorded a value that
+day, and that set shrinks toward surgery — so a decline is consistent with patients doing worse
+**or** with the patients who score highest being the ones who stop wearing the device. All three
+wearable notebooks therefore read every day against that patient's own normal, through the four
+baselines in `baselines.py`. Each one draws the observed cross-sectional curve exactly once,
+dotted, beside the four baseline levels, as the thing being replaced. **Any new longitudinal metric
+gets the same treatment, and a cross-sectional median is not to be added back as a finding.**
+
+**Which baseline is not settled.** The four disagree structurally: the static one is frozen and
+cannot follow a patient whose normal genuinely moved, while the trailing ones are partly built from
+post-operative days and so under-report the very change a recovery metric is measuring. Each
+notebook prices all four — person-days kept, patients kept, rank agreement, and the share of the
+post-operative month each calls abnormal — and records `baseline_choice="unsettled"` in its
+scorecard. Their parameters are inherited from a sweep against a cancer-diagnosis index in another
+project and have never been re-swept here.
 
 **Nights and days with no record are absent, not zero.** No wearable query zero-fills. This is
 correct, and it is exactly why the denominator moves from day to day.
@@ -197,6 +210,7 @@ the record of what was tried and why it failed — which is what stops it being 
 |---|---|
 | `days_alive_out_of_hospital.ipynb` | the composite needs death records this CDR does not usefully carry, which would silently score deaths as perfect recoveries |
 | `discharge_disposition.ipynb` | a discharge destination is recorded for roughly 5% of the cohort |
+| `sleep_efficiency.ipynb` | **absorbed rather than rejected.** It was the `individual_baselines/` task, where the four baselines were first applied to one measure; that analysis is now how `outcomes/fitbit_sleep.ipynb` reads sleep, so keeping a live copy would mean two definitions of one thing |
 
 Retiring is not finished until the references are gone: `metric_comparison.ipynb` built DAOH itself
 rather than reading it from a scorecard, so retiring that metric meant editing three of its cells.

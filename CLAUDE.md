@@ -101,6 +101,7 @@ Currently in `not_using/`:
 |---|---|
 | `days_alive_out_of_hospital.ipynb` | Composite needs death records the CDR does not usefully carry, which would silently score deaths as perfect recoveries |
 | `discharge_disposition.ipynb` | A discharge destination is recorded for roughly 5% of the cohort |
+| `sleep_efficiency.ipynb` | **Absorbed, not rejected.** It was the `individual_baselines/` task; its four-baseline comparison is now how `outcomes/fitbit_sleep.ipynb` reads sleep, so a separate copy would be a second definition of the same analysis. Kept for the record of where the pattern came from |
 
 Shared code lives in **`srp_common.py` at the repo root** -- CDR resolution, the cohort
 definition, the Parquet-cached BigQuery reader, small-cell suppression and the shared
@@ -110,17 +111,31 @@ up from `cwd`, so they run from either the task directory or the root.
 **`baselines.py`, also at the repo root, holds the four individual wearable baselines** --
 a frozen pre-operative lookback, a trailing flat window, a trailing exponential window, and a
 short window read against a long one -- plus the parameters each was settled at. A baseline
-here is one patient's own normal, which is what a cross-sectional curve lacks:
-`outcomes/fitbit_sleep.ipynb` showed that part of the peri-operative sleep dip was who was
-wearing the device rather than how anyone slept. Every function takes a **person-day grid**
-(one row per `rel_day`, one column per patient) and `daily_summary` is the only way back out
-of one, so participant-level values never reach a print or a figure.
+here is one patient's own normal, which is what a cross-sectional curve lacks: a per-day median
+over whoever wore the device that day moves when the wearers move, so a peri-operative dip in
+one is as consistent with the best sleepers taking the device off as with anyone sleeping worse.
+Every function takes a **person-day grid** (one row per `rel_day`, one column per patient) and
+`daily_summary` is the only way back out of one, so participant-level values never reach a print
+or a figure.
+
+**All three wearable notebooks now run on it, and none of them draws a cross-sectional signal
+curve as a result.** `outcomes/fitbit_sleep.ipynb`, `fitbit_steps.ipynb` and
+`fitbit_heart_rate.ipynb` each build a grid, apply all four baselines, and report the levels, what
+each costs in patients and person-days, the departures around surgery, and whether the choice of
+baseline changes the ordering of days. The observed cross-sectional curve appears once per
+notebook, dotted, drawn beside the levels as the thing the baselines replace -- never as a finding.
+Do not add a cross-sectional median back as a result: that was the point of the integration.
+
+`srp_common` carries the three helpers that boundary sits on -- **`reportable_days`**, the only
+path from a grid to a printable number, and **`plot_baseline_curves`** / **`plot_baseline_coverage`**,
+which always save through the suppressing path. They live in `srp_common` rather than `baselines.py`
+because they need a `Session`, and `baselines.py` is deliberately free of paths, globals and I/O.
 
 **Its constants are inherited, not settled here.** They were swept against a cancer-diagnosis
-index in another project, so the shapes carry over and the numbers are a starting point;
-`individual_baselines/sleep_efficiency.ipynb` applies all four to sleep efficiency and compares
-what each costs, but nothing in this repo has re-swept them. Treat a change to one as a change
-to a result, the same way a `PINNED_CDR` bump is.
+index in another project, so the shapes carry over and the numbers are a starting point. Every
+wearable notebook prints what each parameter resolved to and what each baseline cost, but
+**nothing in this repo has re-swept them against a surgical cohort.** Treat a change to one as a
+change to a result, the same way a `PINNED_CDR` bump is.
 
 **Verily Workbench does not publish the CDR through the environment** -- there is no
 `WORKSPACE_CDR` and no `GOOGLE_CLOUD_PROJECT`. So the dataset is **pinned in
