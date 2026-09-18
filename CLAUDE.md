@@ -60,6 +60,32 @@ every refresh is never what was meant. Nested git repositories, including
 keeping before running it. That makes it wrong for a checkout where notebooks are actually
 being edited, which is why it is a separate command rather than a redefinition of `pull`.
 
+### Finishing a change: merge it
+
+A change is not finished when it is committed and pushed to a branch — it is finished when it
+is **merged into `main` and `main` is pushed**. Leaving a green branch for someone to merge
+later is the failure mode this rule exists to stop: the workbench refreshes with `git sync`,
+which hard-resets to `origin/<branch>`, so an unmerged branch is invisible from the machine
+the analysis actually runs on. Work that has not reached `origin/main` may as well not exist.
+
+The full sequence for any change, and the default unless told otherwise in the moment:
+
+```
+commit -> push -u origin <branch> -> merge --no-ff into main -> push origin main
+```
+
+Merge with **`--no-ff`** and a message of the form `Merge the <thing> into main`, which is what
+the history already uses. The merge commit is the record of what shipped as one unit; a
+fast-forward erases that boundary and makes a change impossible to revert as a whole. Afterwards
+delete the branch and remove the worktree — the commits live in `main`, and a worktree is
+regenerable.
+
+**Two things this does not license.** Never commit directly to `main` and never force-push it:
+the branch-then-merge shape is the point, not a formality. And merging weakens nothing in
+`allofus-data-governance` — output stripping and the pre-commit guard run on the branch commit,
+so a merge that carries unstripped outputs is still a DUA violation. Never `--no-verify`, on
+either side of the merge.
+
 Two skills govern this repo. Consult them rather than relying on this summary:
 
 | Skill | Scope | Owns |
