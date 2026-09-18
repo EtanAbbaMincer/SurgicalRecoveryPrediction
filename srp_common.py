@@ -794,6 +794,96 @@ def index_visit_cte(cfg: "Session") -> str:
 
 
 # ===========================================================================
+# The steps recovery outcome
+#
+# "Is there enough data" and "what is the number we would predict" are different
+# questions, but they have to run off one definition of the number, or the coverage
+# reported for the outcome is the coverage of something else. fitbit_steps.ipynb
+# constructs and characterises it; metric_comparison.ipynb correlates it against the
+# EHR metrics; both call this.
+# ===========================================================================
+
+# Days of wear required in each window before a patient's median is treated as a
+# level rather than an accident of one or two days. Seven is the smallest number that
+# spans a week, so it cannot be satisfied entirely by weekend or entirely by weekday
+# activity -- which differ enough in step count to matter.
+STEPS_MIN_WINDOW_DAYS = 7
+
+
+def steps_outcome_cte(cfg: "Session", windows: dict | None = None,
+                      min_days: int = STEPS_MIN_WINDOW_DAYS) -> str:
+    """CTEs 'activity' and 'steps_outcome': one steps recovery ratio per patient.
+
+    Pass this to cohort_ctes(extra=...); it depends on index_surgery and defines
+
+        activity       person_id, rel_day, steps    -- one row per patient-day worn
+        steps_outcome  person_id, baseline_steps, postop_steps, baseline_days,
+                       postop_days, steps_recovery_ratio
+
+    The ratio is that patient's median daily steps in the post-operative window over
+    their median in the baseline window, so 1.0 is "back to the level they were at
+    before surgery" and it is a within-patient measure: a sedentary patient and an
+    athlete both recover at 1.0. Medians rather than means because one 30,000-step day
+    would otherwise carry a week.
+
+    It is NULL, never 0 or 1, for anyone under `min_days` of wear on either side.
+    Those patients are unmeasured rather than non-recovering, and that distinction is
+    the whole difference between a missing outcome and a bad one.
+
+    The windows come from DEFAULT_WINDOWS unless overridden, so this baseline spans the
+    same days as every other notebook's baseline. Note what that makes it: the baseline
+    runs to the day before surgery and is already depressed by the condition being
+    operated on, so a ratio of 1.0 is a return to immediately pre-operative function,
+    not to health.
+    """
+    windows = windows or DEFAULT_WINDOWS
+    base_lo, base_hi = windows["baseline"]
+    post_lo, post_hi = windows["postop"]
+
+    require_columns({"activity_summary": ["person_id", "date", "steps"]}, cdr=cfg.CDR)
+
+    return f"""
+    activity AS (
+        SELECT
+            a.person_id,
+            DATE_DIFF(a.date, i.index_date, DAY) AS rel_day,
+            a.steps
+        FROM `{cfg.CDR}`.activity_summary AS a
+        JOIN index_surgery AS i ON i.person_id = a.person_id
+        WHERE a.steps IS NOT NULL
+    ),
+    steps_windows AS (
+        SELECT
+            person_id,
+            -- SAFE_OFFSET, not OFFSET: a patient who wore the device on only one side
+            -- of the surgery contributes no values to the other window, and
+            -- APPROX_QUANTILES over nothing is an empty array, not a row of nulls.
+            APPROX_QUANTILES(IF(rel_day BETWEEN {base_lo} AND {base_hi}, steps, NULL),
+                             100)[SAFE_OFFSET(50)] AS baseline_steps,
+            APPROX_QUANTILES(IF(rel_day BETWEEN {post_lo} AND {post_hi}, steps, NULL),
+                             100)[SAFE_OFFSET(50)] AS postop_steps,
+            COUNTIF(rel_day BETWEEN {base_lo} AND {base_hi}) AS baseline_days,
+            COUNTIF(rel_day BETWEEN {post_lo} AND {post_hi}) AS postop_days
+        FROM activity
+        GROUP BY person_id
+    ),
+    steps_outcome AS (
+        SELECT
+            person_id,
+            baseline_steps,
+            postop_steps,
+            baseline_days,
+            postop_days,
+            -- NULLIF guards the patient whose baseline median is a genuine zero: their
+            -- ratio is undefined, not infinite.
+            IF(baseline_days >= {min_days} AND postop_days >= {min_days},
+               SAFE_DIVIDE(postop_steps, NULLIF(baseline_steps, 0)),
+               NULL) AS steps_recovery_ratio
+        FROM steps_windows
+    )"""
+
+
+# ===========================================================================
 # Scorecard hand-off between notebooks
 #
 # The point of an audit is the comparison, and the comparison needs every metric's
