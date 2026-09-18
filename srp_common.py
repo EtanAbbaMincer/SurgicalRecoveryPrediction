@@ -1078,3 +1078,125 @@ def plot_distribution(cfg, df, label_col, count_col="n_patients", title="",
     else:
         fig.text(0.01, 0.005, full_note, fontsize=8, color=INK_MUTED)
     return fig, absorbed
+
+
+# ===========================================================================
+# Person-day grids
+#
+# `baselines.py` works on a grid holding one row per rel_day and one column per
+# patient, which is participant-level by construction. The three helpers below are
+# the boundary between that object and anything a notebook may print, plot or save:
+# every one of them reduces a grid to per-day aggregates and drops the days fewer
+# than SUPPRESS_THRESHOLD patients contributed to, before the caller sees a number.
+#
+# They live here rather than in baselines.py because they need a Session -- the
+# figure directory, the CDR stamp and the '_suppressed' naming rule all come from
+# it -- and baselines.py is deliberately free of paths, globals and I/O.
+# ===========================================================================
+
+
+def reportable_days(grid):
+    """A person-day grid as one row per rel_day, with the under-threshold days dropped.
+
+    THIS IS THE ONLY PATH FROM A GRID TO A PRINTABLE NUMBER. What comes back is a
+    median, two quartiles and a contributor count per day; any day fewer than
+    SUPPRESS_THRESHOLD patients contributed to is gone before the caller sees it, so a
+    number taken from this frame cannot be one participant's own value.
+    """
+    import baselines
+
+    summary = baselines.daily_summary(grid)
+    return summary.loc[summary["n_patients"] >= SUPPRESS_THRESHOLD].reset_index(drop=True)
+
+
+def plot_baseline_curves(cfg, frames, title="", ylabel="", save_as=None, span=None,
+                         zero_line=False, note="", colours=None):
+    """Draw several already-suppressed rel_day curves on one axis and save the figure.
+
+    `frames` is {label: frame from reportable_days()}. plot_rel_day_curve draws one
+    series per figure, and reading four baselines against each other is the whole point
+    of a baseline comparison, so this is its multi-series counterpart in the same house
+    style. A label beginning "observed" is drawn dotted, because the observed curve is
+    context rather than a result -- it is the cross-sectional series the baselines exist
+    to replace.
+
+    Colours CYCLE rather than zipping against the palette: CATEGORICAL holds four and a
+    figure here can carry five, and zipping would drop the fifth curve silently instead
+    of repeating a colour visibly.
+
+    IT ALWAYS SAVES THROUGH THE SUPPRESSING PATH, so every frame passed in must already
+    have come from reportable_days() -- the '_suppressed' suffix is what .gitignore and
+    the pre-commit hook key on, and a figure carrying it without having been filtered is
+    a false claim.
+    """
+    import matplotlib.pyplot as plt
+
+    palette = list(colours) if colours else list(CATEGORICAL)
+    fig, ax = plt.subplots(figsize=(10, 4.8), facecolor=SURFACE)
+    style_axes(ax)
+    ax.axvline(0, color=INK_MUTED, linewidth=1, linestyle="--", zorder=2)
+    if zero_line:
+        ax.axhline(0, color=INK_MUTED, linewidth=1, linestyle=":", zorder=2)
+
+    for i, (label, frame) in enumerate(frames.items()):
+        visible = frame if span is None else frame.loc[frame["rel_day"].between(*span)]
+        ax.plot(visible["rel_day"], visible["p50"], color=palette[i % len(palette)],
+                linewidth=2, linestyle=":" if label.startswith("observed") else "-",
+                label=label, zorder=3)
+
+    ax.set_title(title, fontsize=13, fontweight="600", color=INK, loc="left", pad=12)
+    ax.set_xlabel("days relative to index surgery", fontsize=10, color=INK_MUTED)
+    ax.set_ylabel(ylabel, fontsize=10, color=INK_MUTED)
+    if span is not None:
+        ax.set_xlim(*span)
+    ax.legend(frameon=False, fontsize=9, labelcolor=INK_MUTED, ncol=len(frames))
+    if save_as:
+        cfg.save_figure(fig, save_as, True, note)
+    return fig
+
+
+def plot_baseline_coverage(cfg, grid, deviations, span, title="", ylabel="patients scored",
+                           save_as=None, names=None):
+    """How many patients each baseline can actually score, day by day, against the ceiling.
+
+    The coverage table a notebook prints is a total over the whole span and cannot show
+    that the cost moves within it. A trailing baseline is hungriest right after surgery,
+    when the device is least likely to have been worn, so the days a recovery metric most
+    needs are the days its baseline is most likely to refuse -- which shows up here as a
+    curve dropping out and nowhere else.
+
+    The dotted ceiling is the eligible values actually recorded, which no baseline exceeds.
+    Every series is suppressed the same way a median series is: a day under the threshold
+    is dropped rather than drawn at its true height, on a count series as much as on a
+    quantile.
+    """
+    import baselines
+    import matplotlib.pyplot as plt
+
+    names = tuple(names) if names else baselines.BASELINE_NAMES
+    first, last = span
+
+    fig, ax = plt.subplots(figsize=(10, 4.8), facecolor=SURFACE)
+    style_axes(ax)
+    ax.axvline(0, color=INK_MUTED, linewidth=1, linestyle="--", zorder=2)
+
+    ceiling = grid.notna().sum(axis=1).loc[first:last]
+    visible = ceiling[ceiling >= SUPPRESS_THRESHOLD]
+    ax.plot(visible.index, visible, color=INK_MUTED, linewidth=2, linestyle=":",
+            label="eligible value recorded", zorder=3)
+
+    for i, name in enumerate(names):
+        scored = deviations[name].notna().sum(axis=1).loc[first:last]
+        visible = scored[scored >= SUPPRESS_THRESHOLD]
+        ax.plot(visible.index, visible, color=CATEGORICAL[i % len(CATEGORICAL)],
+                linewidth=2, label=name, zorder=3)
+
+    ax.set_title(title, fontsize=13, fontweight="600", color=INK, loc="left", pad=12)
+    ax.set_xlabel("days relative to index surgery", fontsize=10, color=INK_MUTED)
+    ax.set_ylabel(ylabel, fontsize=10, color=INK_MUTED)
+    ax.set_xlim(first, last)
+    ax.legend(frameon=False, fontsize=9, labelcolor=INK_MUTED, ncol=len(names) + 1)
+    if save_as:
+        cfg.save_figure(fig, save_as, True,
+                        f"days under {SUPPRESS_THRESHOLD} contributing patients omitted")
+    return fig
